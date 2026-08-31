@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+rapidfuzz
+xlrd
+openpyxl
+xlutils
+python-multipart

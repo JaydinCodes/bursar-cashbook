@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Bursar Cashbook Review</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 1100px; margin: 2rem auto; padding: 0 1rem; color: #172033; }
+    h1 { margin-bottom: .2rem; } form, table { width: 100%; } form { padding: 1rem; background: #f1f5f9; display: flex; gap: .75rem; flex-wrap: wrap; align-items: end; }
+    label { display: grid; gap: .3rem; } button, .button { background: #0f766e; color: white; border: 0; border-radius: .3rem; padding: .6rem .9rem; cursor: pointer; text-decoration: none; }
+    table { border-collapse: collapse; margin-top: 1.5rem; } th, td { border-bottom: 1px solid #dbe3ed; text-align: left; padding: .65rem .45rem; vertical-align: top; }
+    select { min-width: 220px; } #message { min-height: 1.5rem; } .muted { color: #64748b; }
+  </style>
+</head>
+<body>
+  <h1>Cashbook review</h1><p class="muted">Upload a bank export, then approve or correct each suggested category.</p>
+  <form id="upload-form"><label>Bank <select name="bank"><option value="">Generic CSV</option><option>FNB</option><option>ABSA</option><option selected>Standard Bank</option><option>Nedbank</option><option>Capitec</option></select></label><label>Statement <input name="file" type="file" accept=".csv,.xls,.xlsx" required></label><button>Upload statement</button></form>
+  <form id="category-form"><label>New category <input name="name" placeholder="e.g. School transport" required></label><label>Type <select name="type"><option value="expense">Expense</option><option value="income">Income</option></select></label><button>Add category</button><a class="button" href="/exports/reviewed-cashbook.xlsx">Download reviewed cashbook</a><a class="button" href="/exports/wced-cashbook.xls">Download WCED cashbook</a></form>
+  <p id="message"></p><table><thead><tr><th>Date</th><th>Description</th><th>Amount</th><th>Suggested category</th><th>Approve / correct</th></tr></thead><tbody id="rows"></tbody></table>
+  <script>
+    let categories = [];
+    const message = document.querySelector('#message');
+    const escapeHtml = value => String(value).replace(/[&<>'"]/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
+    async function load() {
+      categories = await (await fetch('/categories')).json();
+      const transactions = await (await fetch('/transactions/pending')).json();
+      document.querySelector('#rows').innerHTML = transactions.map(t => {
+        const blank = `<option value="" ${t.suggested_category_id ? '' : 'selected'} disabled>Select category</option>`;
+        const options = categories.map(c => `<option value="${c.id}" ${c.id === t.suggested_category_id ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('');
+        const suggestion = t.suggested_category ? `${escapeHtml(t.suggested_category)} (${Math.round(t.confidence * 100)}%)` : 'No suggestion';
+        return `<tr><td>${t.date}</td><td>${escapeHtml(t.description)}</td><td>${t.direction === 'debit' ? '-' : '+'} R${t.amount}</td><td>${suggestion}</td><td><select id="category-${t.id}">${blank}${options}</select> <button onclick="review(${t.id})">Save</button></td></tr>`;
+      }).join('') || '<tr><td colspan="5">Nothing waiting for review.</td></tr>';
+    }
+    async function review(id) {
+      const category_id = Number(document.querySelector(`#category-${id}`).value);
+      if (!category_id) { message.textContent = 'Select a category before saving.'; return; }
+      const response = await fetch(`/transactions/${id}/review`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({category_id, learn:true})});
+      if (!response.ok) { message.textContent = (await response.json()).detail; return; }
+      message.textContent = 'Saved. Future matching transactions will use this correction.'; load();
+    }
+    document.querySelector('#upload-form').addEventListener('submit', async event => { event.preventDefault(); const response = await fetch('/statements/upload', {method:'POST', body:new FormData(event.target)}); const data = await response.json(); message.textContent = response.ok ? `${data.transactions_imported} transactions imported; ${data.pending_review} need review.` : data.detail; if(response.ok) { event.target.reset(); load(); } });
+    document.querySelector('#category-form').addEventListener('submit', async event => { event.preventDefault(); const form = new FormData(event.target); const response = await fetch('/categories', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name: form.get('name'), type: form.get('type')})}); const data = await response.json(); message.textContent = response.ok ? `${data.name} added.` : data.detail; if(response.ok) { event.target.reset(); load(); } });
+    load();
+  </script>
+</body>
+</html>
