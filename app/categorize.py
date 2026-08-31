@@ -4,7 +4,7 @@ from decimal import Decimal
 from rapidfuzz import fuzz, process
 from sqlalchemy.orm import Session
 
-from .models import Rule
+from .models import Category, Rule
 
 SUFFIXES = (" LTD", " PTY", " (PTY)", " CC")
 
@@ -20,16 +20,27 @@ def normalize_payee(raw: str) -> str:
     return normalized
 
 
-def categorize(payee_raw: str, db: Session, fuzzy_threshold: int = 90):
-    """Return (category_id, confidence, method) for an expense description."""
+def categorize(
+    payee_raw: str,
+    db: Session,
+    fuzzy_threshold: int = 90,
+    category_type: str | None = None,
+):
+    """Return (category_id, confidence, method), optionally scoped by category type."""
     normalized = normalize_payee(payee_raw)
-    exact_rules = db.query(Rule).filter(Rule.payee_pattern == normalized).all()
+    exact_query = db.query(Rule).filter(Rule.payee_pattern == normalized)
+    if category_type is not None:
+        exact_query = exact_query.join(Rule.category).filter(Category.type == category_type)
+    exact_rules = exact_query.all()
 
     if exact_rules:
         best = max(exact_rules, key=lambda rule: (rule.confidence, rule.hit_count, -rule.id))
         return best.category_id, float(best.confidence), "exact"
 
-    all_rules = db.query(Rule).all()
+    all_rules_query = db.query(Rule)
+    if category_type is not None:
+        all_rules_query = all_rules_query.join(Rule.category).filter(Category.type == category_type)
+    all_rules = all_rules_query.all()
     if not all_rules:
         return None, 0.0, "no_rules"
 

@@ -11,6 +11,11 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from .audit import audit_event_to_dict, record_audit_event
+from .automation import (
+    AUTO_APPROVE_MIN_CONFIDENCE,
+    AUTO_APPROVE_MIN_HITS,
+    trusted_exact_match,
+)
 from .backups import (
     BACKUP_DIR,
     create_sqlite_backup,
@@ -43,7 +48,9 @@ from .version import APP_VERSION
 from .wced_export import (
     WcedExportError,
     WcedTransaction,
-    export_wced_cashbook as build_wced_cashbook,
+    build_wced_cashbook,
+    cashbook_target_sheet,
+    validate_wced_cashbook,
 )
 
 app = FastAPI(title="Bursar Cashbook Automation", version=APP_VERSION)
@@ -215,6 +222,51 @@ def _excel_safe_text(value: str | None) -> str | None:
     if value.startswith(("=", "+", "-", "@")):
         return f"'{value}"
     return value
+
+
+def _is_auto_approved(transaction: Transaction) -> bool:
+    return (
+        transaction.status == "approved"
+        and transaction.category_id is not None
+        and transaction.category_id == transaction.suggested_category_id
+        and transaction.suggestion_method == "exact"
+        and transaction.suggestion_confidence is not None
+        and float(transaction.suggestion_confidence) >= AUTO_APPROVE_MIN_CONFIDENCE
+        and transaction.learned_category_id is None
+    )
+
+
+def _cashbook_preview_item(transaction: Transaction) -> dict:
+    final_category = transaction.category
+    suggested_category = transaction.suggested_category
+    category = final_category or suggested_category
+
+    if transaction.status == "pending":
+        allocation_status = "needs_review"
+    elif _is_auto_approved(transaction):
+        allocation_status = "auto_approved"
+    else:
+        allocation_status = transaction.status
+
+    return {
+        "transaction_id": transaction.id,
+        "statement_id": transaction.statement_id,
+        "date": transaction.txn_date.isoformat(),
+        "description": transaction.payee_raw,
+        "reference": transaction.reference,
+        "direction": transaction.direction,
+        "amount": str(transaction.amount),
+        "target_sheet": cashbook_target_sheet(transaction.txn_date, transaction.direction),
+        "category_id": category.id if category else None,
+        "category_name": category.name if category else None,
+        "allocation_status": allocation_status,
+        "confidence": (
+            float(transaction.suggestion_confidence)
+            if transaction.suggestion_confidence is not None
+            else None
+        ),
+        "suggestion_method": transaction.suggestion_method,
+    }
 
 
 def _statement_history_item(db: Session, statement: Statement) -> dict:
@@ -473,6 +525,13 @@ def _export_summary(db: Session, year: int) -> dict:
 
     pending = sum(1 for transaction in transactions if transaction.status == "pending")
     reviewed = sum(1 for transaction in transactions if transaction.status in FINAL_STATUSES)
+    auto_approved = sum(1 for transaction in transactions if _is_auto_approved(transaction))
+    corrected = sum(1 for transaction in transactions if transaction.status == "corrected")
+    manually_approved = sum(
+        1
+        for transaction in transactions
+        if transaction.status == "approved" and not _is_auto_approved(transaction)
+    )
     money_out = sum(
         (transaction.amount for transaction in transactions if transaction.direction == "debit"),
         start=0,
@@ -492,6 +551,9 @@ def _export_summary(db: Session, year: int) -> dict:
         "year": year,
         "transaction_count": len(transactions),
         "reviewed": reviewed,
+        "auto_approved": auto_approved,
+        "manually_approved": manually_approved,
+        "corrected": corrected,
         "pending": pending,
         "money_out": f"{money_out:.2f}",
         "money_in": f"{money_in:.2f}",
@@ -516,6 +578,87 @@ def export_summary(
     db: Session = Depends(get_db),
 ):
     return _export_summary(db, year)
+
+
+@app.get("/cashbook/preview")
+def cashbook_preview(
+    year: int = Query(..., ge=2000, le=2100),
+    db: Session = Depends(get_db),
+):
+    start, end = _year_bounds(year)
+    transactions = (
+        db.query(Transaction)
+        .filter(Transaction.txn_date >= start, Transaction.txn_date < end)
+        .order_by(Transaction.txn_date, Transaction.id)
+        .all()
+    )
+    rows = [_cashbook_preview_item(transaction) for transaction in transactions]
+
+    allocation_map: dict[tuple[str, str, str], dict] = {}
+    for row in rows:
+        category_name = row["category_name"] or "Unallocated"
+        key = (category_name, row["direction"], row["allocation_status"])
+        current = allocation_map.setdefault(
+            key,
+            {
+                "category_name": category_name,
+                "direction": row["direction"],
+                "allocation_status": row["allocation_status"],
+                "transaction_count": 0,
+                "total_amount": 0,
+                "target_sheets": set(),
+            },
+        )
+        current["transaction_count"] += 1
+        current["total_amount"] += float(row["amount"])
+        current["target_sheets"].add(row["target_sheet"])
+
+    allocations = []
+    for current in allocation_map.values():
+        allocations.append(
+            {
+                **current,
+                "total_amount": f'{current["total_amount"]:.2f}',
+                "target_sheets": sorted(current["target_sheets"]),
+            }
+        )
+    allocations.sort(
+        key=lambda item: (item["direction"], item["category_name"], item["allocation_status"])
+    )
+
+    statements = (
+        db.query(Statement)
+        .filter(Statement.period_end >= start, Statement.period_start < end)
+        .order_by(Statement.period_start, Statement.id)
+        .all()
+    )
+
+    return {
+        "year": year,
+        "automation_policy": {
+            "exact_match_only": True,
+            "minimum_confidence": AUTO_APPROVE_MIN_CONFIDENCE,
+            "minimum_historical_hits": AUTO_APPROVE_MIN_HITS,
+            "income_auto_approval": True,
+        },
+        "summary": _export_summary(db, year),
+        "statements": [
+            {
+                "statement_id": statement.id,
+                "period_start": statement.period_start.isoformat(),
+                "period_end": statement.period_end.isoformat(),
+                "opening_balance": str(statement.opening_balance),
+                "total_credits": str(statement.total_credits),
+                "total_debits": str(statement.total_debits),
+                "closing_balance": str(statement.closing_balance),
+                "reconciliation_difference": str(statement.reconciliation_difference),
+                "reconciliation_status": statement.reconciliation_status,
+            }
+            for statement in statements
+        ],
+        "allocations": allocations,
+        "rows": rows,
+    }
 
 
 @app.get("/imports/history")
@@ -701,39 +844,79 @@ async def upload_statement(
     db.add(statement)
     db.flush()
 
+    auto_approved_count = 0
+    pending_review_count = 0
+
     for raw, fingerprint in new_transactions:
         suggested_category_id = None
         suggestion_confidence = None
-        suggestion_method = "income_manual"
+        suggestion_method = None
+        category_id = None
+        status = "pending"
+        trusted_match = None
+        expected_category_type = "expense" if raw.direction == "debit" else "income"
 
-        if raw.direction == "debit":
-            suggested_category_id, confidence, suggestion_method = categorize(
+        suggested_category_id, confidence, suggestion_method = categorize(
+            raw.description,
+            db,
+            category_type=expected_category_type,
+        )
+        if suggested_category_id is not None:
+            suggestion_confidence = confidence
+
+        if suggestion_method == "exact":
+            trusted_match = trusted_exact_match(
                 raw.description,
                 db,
+                category_type=expected_category_type,
             )
-            if suggested_category_id is not None:
-                suggestion_confidence = confidence
 
-        db.add(
-            Transaction(
-                statement_id=statement.id,
-                fingerprint=fingerprint,
-                source_row=raw.source_row,
-                txn_date=raw.txn_date,
-                payee_raw=raw.description,
-                payee_normalized=normalize_payee(raw.description),
-                reference=raw.reference,
-                balance_after=raw.balance_after,
-                amount=raw.amount,
-                direction=raw.direction,
-                suggested_category_id=suggested_category_id,
-                suggestion_confidence=suggestion_confidence,
-                suggestion_method=suggestion_method,
-                category_id=None,
-                learned_category_id=None,
-                status="pending",
-            )
+        if (
+            trusted_match is not None
+            and trusted_match.category_id == suggested_category_id
+        ):
+            category_id = suggested_category_id
+            status = "approved"
+            auto_approved_count += 1
+        else:
+            pending_review_count += 1
+
+        transaction = Transaction(
+            statement_id=statement.id,
+            fingerprint=fingerprint,
+            source_row=raw.source_row,
+            txn_date=raw.txn_date,
+            payee_raw=raw.description,
+            payee_normalized=normalize_payee(raw.description),
+            reference=raw.reference,
+            balance_after=raw.balance_after,
+            amount=raw.amount,
+            direction=raw.direction,
+            suggested_category_id=suggested_category_id,
+            suggestion_confidence=suggestion_confidence,
+            suggestion_method=suggestion_method,
+            category_id=category_id,
+            learned_category_id=None,
+            status=status,
         )
+        db.add(transaction)
+        db.flush()
+
+        if status == "approved":
+            record_audit_event(
+                db,
+                "transaction.auto_approved",
+                entity_type="transaction",
+                entity_id=transaction.id,
+                details={
+                    "statement_id": statement.id,
+                    "category_id": category_id,
+                    "confidence": suggestion_confidence,
+                    "historical_hits": trusted_match.hit_count if trusted_match else None,
+                    "policy_min_confidence": AUTO_APPROVE_MIN_CONFIDENCE,
+                    "policy_min_hits": AUTO_APPROVE_MIN_HITS,
+                },
+            )
 
     record_audit_event(
         db,
@@ -746,6 +929,8 @@ async def upload_statement(
             "source_transactions": len(parsed.transactions),
             "transactions_imported": len(new_transactions),
             "duplicates_skipped": duplicate_count,
+            "auto_approved": auto_approved_count,
+            "pending_review": pending_review_count,
             "reconciliation_status": "passed",
             "reconciliation_difference": str(reconciliation.difference),
         },
@@ -760,6 +945,8 @@ async def upload_statement(
             "statement_id": statement.id,
             "transactions_imported": len(new_transactions),
             "duplicates_skipped": duplicate_count,
+            "auto_approved": auto_approved_count,
+            "pending_review": pending_review_count,
             "financial_year": financial_year,
             "reconciliation_difference": str(reconciliation.difference),
         },
@@ -770,7 +957,8 @@ async def upload_statement(
         "source_transactions": len(parsed.transactions),
         "transactions_imported": len(new_transactions),
         "duplicates_skipped": duplicate_count,
-        "pending_review": len(new_transactions),
+        "auto_approved": auto_approved_count,
+        "pending_review": pending_review_count,
         "period": {
             "start": period_start.isoformat(),
             "end": period_end.isoformat(),
@@ -903,21 +1091,20 @@ def review_transaction(
     )
 
     learning_changed = False
-    if transaction.direction == "debit":
-        if transaction.learned_category_id is not None:
-            if transaction.learned_category_id != category.id:
-                move_learning_vote(
-                    transaction.payee_raw,
-                    transaction.learned_category_id,
-                    category.id,
-                    db,
-                )
-                transaction.learned_category_id = category.id
-                learning_changed = True
-        elif decision.learn:
-            learn_from_correction(transaction.payee_raw, category.id, db)
+    if transaction.learned_category_id is not None:
+        if transaction.learned_category_id != category.id:
+            move_learning_vote(
+                transaction.payee_raw,
+                transaction.learned_category_id,
+                category.id,
+                db,
+            )
             transaction.learned_category_id = category.id
             learning_changed = True
+    elif decision.learn:
+        learn_from_correction(transaction.payee_raw, category.id, db)
+        transaction.learned_category_id = category.id
+        learning_changed = True
 
     if same_final_category and not learning_changed:
         logger.info(
@@ -1091,7 +1278,9 @@ def download_wced_cashbook(
     ]
 
     try:
-        content = build_wced_cashbook(template_path, records)
+        export_result = build_wced_cashbook(template_path, records)
+        validate_wced_cashbook(export_result.content, export_result.placements)
+        content = export_result.content
     except WcedExportError as exc:
         logger.warning(
             "wced_export_validation_failed",
@@ -1104,12 +1293,21 @@ def download_wced_cashbook(
         "export.wced_cashbook",
         entity_type="financial_year",
         entity_id=year,
-        details={"year": year, "transaction_count": len(transactions)},
+        details={
+            "year": year,
+            "transaction_count": len(transactions),
+            "final_validation": "passed",
+            "validated_placements": len(export_result.placements),
+        },
     )
     db.commit()
     logger.info(
         "wced_cashbook_exported",
-        extra={"year": year, "transaction_count": len(transactions)},
+        extra={
+            "year": year,
+            "transaction_count": len(transactions),
+            "final_validation": "passed",
+        },
     )
 
     return StreamingResponse(

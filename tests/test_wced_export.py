@@ -4,7 +4,12 @@ from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
-from app.wced_export import WcedTransaction, export_wced_cashbook
+from app.wced_export import (
+    WcedTransaction,
+    build_wced_cashbook,
+    export_wced_cashbook,
+    validate_wced_cashbook,
+)
 
 
 @unittest.skipUnless(
@@ -43,6 +48,25 @@ class WcedExportTests(unittest.TestCase):
         self.assertEqual(sheet.cell_value(row, 2), "TEST SUPPLIER")
         self.assertEqual(sheet.cell_value(row, 3), 125.50)
         self.assertEqual(sheet.cell_value(row, 44), 125.50)
+
+    def test_final_validation_reopens_and_checks_written_cells(self):
+        result = build_wced_cashbook(
+            self.template,
+            [
+                WcedTransaction(
+                    txn_date=date(2020, 1, 31),
+                    description="TEST SUPPLIER",
+                    amount=Decimal("125.50"),
+                    direction="debit",
+                    category_name="Nashua",
+                    transaction_id=902,
+                )
+            ],
+        )
+
+        validate_wced_cashbook(result.content, result.placements)
+        self.assertEqual(len(result.placements), 1)
+        self.assertEqual(result.placements[0].sheet_name, "Jan PC")
 
     def test_writes_credit_to_receipts_sheet_and_category_column(self):
         import xlrd

@@ -1,4 +1,4 @@
-"""Write reviewed transactions into the monthly WCED legacy XLS cashbook sheets."""
+"""Write classified transactions into the monthly WCED legacy XLS cashbook."""
 
 from dataclasses import dataclass
 from datetime import date
@@ -65,6 +65,25 @@ class WcedTransaction:
     transaction_id: int
 
 
+@dataclass(frozen=True)
+class WcedPlacement:
+    transaction_id: int
+    txn_date: date
+    description: str
+    amount: Decimal
+    direction: str
+    category_name: str
+    sheet_name: str
+    row: int
+    category_column: int
+
+
+@dataclass(frozen=True)
+class WcedExportResult:
+    content: bytes
+    placements: tuple[WcedPlacement, ...]
+
+
 def rc_column_categories(sheet) -> dict[str, int]:
     categories: dict[str, int] = {}
     last_top: str | None = None
@@ -101,10 +120,11 @@ def _first_empty_row(sheet, start_row: int, columns: tuple[int, ...]) -> int:
     raise WcedExportError(f"No empty capture rows remain in {sheet.name}.")
 
 
-def export_wced_cashbook(
+def build_wced_cashbook(
     template_path: str | Path,
     transactions: list[WcedTransaction],
-) -> bytes:
+) -> WcedExportResult:
+    """Populate a WCED template and return the workbook plus exact placements."""
     try:
         import xlrd
         from xlutils.copy import copy as copy_workbook
@@ -127,6 +147,7 @@ def export_wced_cashbook(
     writable = copy_workbook(source)
     next_rows: dict[str, int] = {}
     category_columns: dict[str, dict[str, int]] = {}
+    placements: list[WcedPlacement] = []
 
     for transaction in transactions:
         if transaction.amount <= 0:
@@ -187,8 +208,101 @@ def export_wced_cashbook(
             writable_sheet.write(row, 4, amount)
 
         writable_sheet.write(row, category_column, amount)
+        placements.append(
+            WcedPlacement(
+                transaction_id=transaction.transaction_id,
+                txn_date=transaction.txn_date,
+                description=transaction.description,
+                amount=transaction.amount,
+                direction=transaction.direction,
+                category_name=transaction.category_name,
+                sheet_name=sheet_name,
+                row=row,
+                category_column=category_column,
+            )
+        )
         next_rows[sheet_name] += 1
 
     output = BytesIO()
     writable.save(output)
-    return output.getvalue()
+    return WcedExportResult(output.getvalue(), tuple(placements))
+
+
+def export_wced_cashbook(
+    template_path: str | Path,
+    transactions: list[WcedTransaction],
+) -> bytes:
+    """Compatibility wrapper returning only the generated workbook bytes."""
+    return build_wced_cashbook(template_path, transactions).content
+
+
+def _same_money(actual: object, expected: Decimal) -> bool:
+    try:
+        return abs(Decimal(str(actual)) - expected) <= Decimal("0.005")
+    except Exception:
+        return False
+
+
+def validate_wced_cashbook(
+    content: bytes,
+    placements: tuple[WcedPlacement, ...] | list[WcedPlacement],
+) -> None:
+    """Re-open the generated workbook and verify every intended cell placement."""
+    try:
+        import xlrd
+    except ImportError as exc:
+        raise WcedExportError(
+            "WCED XLS validation requires xlrd. Install requirements.txt first."
+        ) from exc
+
+    try:
+        workbook = xlrd.open_workbook(file_contents=content)
+    except Exception as exc:
+        raise WcedExportError("Generated WCED workbook could not be reopened for validation.") from exc
+
+    for placement in placements:
+        try:
+            sheet = workbook.sheet_by_name(placement.sheet_name)
+        except Exception as exc:
+            raise WcedExportError(
+                f"Final export validation failed: missing sheet {placement.sheet_name}."
+            ) from exc
+
+        if sheet.cell_value(placement.row, 0) != float(placement.txn_date.day):
+            raise WcedExportError(
+                f"Final export validation failed for transaction {placement.transaction_id}: date was not written correctly."
+            )
+
+        total_column = 3 if placement.direction == "debit" else 4
+        if not _same_money(sheet.cell_value(placement.row, total_column), placement.amount):
+            raise WcedExportError(
+                f"Final export validation failed for transaction {placement.transaction_id}: total amount mismatch."
+            )
+
+        if not _same_money(
+            sheet.cell_value(placement.row, placement.category_column),
+            placement.amount,
+        ):
+            raise WcedExportError(
+                f"Final export validation failed for transaction {placement.transaction_id}: category allocation mismatch."
+            )
+
+        if placement.direction == "debit":
+            actual_description = str(sheet.cell_value(placement.row, 2))
+            if actual_description != placement.description:
+                raise WcedExportError(
+                    f"Final export validation failed for transaction {placement.transaction_id}: description mismatch."
+                )
+        else:
+            expected_reference = f"IMPORT/{placement.transaction_id}"
+            if str(sheet.cell_value(placement.row, 3)) != expected_reference:
+                raise WcedExportError(
+                    f"Final export validation failed for transaction {placement.transaction_id}: receipt reference mismatch."
+                )
+
+
+def cashbook_target_sheet(txn_date: date, direction: str) -> str:
+    if direction not in {"debit", "credit"}:
+        raise WcedExportError(f"Unsupported transaction direction: {direction!r}.")
+    suffix = "PC" if direction == "debit" else "RC"
+    return f"{MONTH_SHEET_NAMES[txn_date.month]} {suffix}"

@@ -25,21 +25,25 @@ Do not use a historical cashbook containing real captured entries as the blank e
 
 If reconciliation fails, stop and contact support. Do not manually force the statement through.
 
-## Review transactions
+## Review exceptions
 
-Every imported transaction requires review.
+Trusted historical matches are allocated automatically. The app only sends uncertain transactions to **Exceptions requiring review**.
 
+- Exact historical matches are auto-approved only when confidence is at least 95% with at least 3 prior occurrences.
+- Fuzzy matches and new descriptions always require review; income can auto-approve after enough consistent manual history exists.
 - Money out uses an **expense** category.
 - Money in uses an **income** category.
 - Review the suggested category and change it where necessary.
-- Click **Save** for every transaction.
+
+Use **Cashbook preview** to see every transaction, the target PC/RC sheet and the category that will be written to Excel. An automatic allocation can still be corrected from the preview before export.
 
 ## Generate a cashbook
 
 1. Choose the financial year.
 2. Select **Generate reviewed cashbook** or **Generate WCED cashbook**.
-3. Check the confirmation summary.
+3. Check the cashbook preview and confirmation summary.
 4. Confirm only when pending transactions are `0` and reconciliation has passed.
+5. The app reopens the generated WCED workbook and validates every written date, total and category allocation before the download is returned.
 
 During the pilot, compare the generated output with the normal manual cashbook process before treating it as final.
 

@@ -49,7 +49,7 @@
       <a class="button secondary" href="/help">Help</a>
     </div>
   </div>
-  <p class="muted">Standard Bank pilot. Every imported transaction requires bursar review before export.</p>
+  <p class="muted">Standard Bank pilot. Trusted historical matches are allocated automatically; only uncertain transactions require review.</p>
 
   <section class="panel">
     <h2>1. Import statement</h2>
@@ -71,22 +71,36 @@
   </section>
 
   <section class="panel">
-    <h2>3. Export</h2>
+    <h2>5. Export</h2>
     <div class="actions">
       <label>Financial year<input id="export-year" type="number" min="2000" max="2100" required></label>
       <button type="button" id="reviewed-export">Generate reviewed cashbook</button>
       <button type="button" id="wced-export">Generate WCED cashbook</button>
     </div>
-    <p class="muted">A confirmation summary is shown before every export. Exports remain blocked while transactions are pending.</p>
+    <p class="muted">A confirmation summary is shown before every export. The generated WCED workbook is reopened and every written placement is validated before download.</p>
   </section>
 
   <p id="message"></p>
 
-  <h2>Pending review</h2>
+  <h2>3. Exceptions requiring review</h2>
   <table>
     <thead><tr><th>Date</th><th>Description</th><th>Reference</th><th>Amount</th><th>Balance</th><th>Suggestion</th><th>Approve / correct</th></tr></thead>
     <tbody id="rows"></tbody>
   </table>
+
+  <section class="panel">
+    <div class="header-row">
+      <div><h2>4. Cashbook preview</h2><p class="muted">This is the cashbook representation that will be written into the real WCED Excel template.</p></div>
+      <button type="button" class="secondary" id="refresh-preview">Refresh preview</button>
+    </div>
+    <div id="automation-summary" class="summary-grid"></div>
+    <h3>Reconciliation</h3>
+    <div id="preview-reconciliation" class="scroll"></div>
+    <h3>Category allocations</h3>
+    <div class="scroll"><table><thead><tr><th>Type</th><th>Category</th><th>Status</th><th>Transactions</th><th>Total</th><th>Sheets</th></tr></thead><tbody id="allocation-preview"></tbody></table></div>
+    <h3>Cashbook rows</h3>
+    <div class="scroll"><table><thead><tr><th>Date</th><th>Sheet</th><th>Description</th><th>Amount</th><th>Category</th><th>Status</th><th>Change allocation</th></tr></thead><tbody id="cashbook-preview"></tbody></table></div>
+  </section>
 
   <section class="panel">
     <h2>Support & history</h2>
@@ -178,6 +192,36 @@
       }).join('') || '<tr><td colspan="7">Nothing waiting for review.</td></tr>';
     }
 
+    async function loadPreview() {
+      const year = Number(yearInput.value);
+      if (!year) return;
+      const response = await fetch(`/cashbook/preview?year=${year}`);
+      const data = await readJson(response);
+      if (!response.ok) { message.textContent = apiError(data, 'Could not load cashbook preview.'); return; }
+      const summary = data.summary;
+      document.querySelector('#automation-summary').innerHTML = `<div class="summary-item"><strong>Transactions</strong><br>${summary.transaction_count}</div><div class="summary-item"><strong>Auto-approved</strong><br>${summary.auto_approved}</div><div class="summary-item"><strong>Manually approved</strong><br>${summary.manually_approved}</div><div class="summary-item"><strong>Corrected</strong><br>${summary.corrected}</div><div class="summary-item"><strong>Needs review</strong><br>${summary.pending}</div><div class="summary-item"><strong>Automation rule</strong><br>Exact ≥ ${Math.round(data.automation_policy.minimum_confidence * 100)}%, ${data.automation_policy.minimum_historical_hits}+ hits</div>`;
+      document.querySelector('#preview-reconciliation').innerHTML = data.statements.map(item => `<div class="check"><strong>${escapeHtml(item.period_start)} → ${escapeHtml(item.period_end)}</strong><br>Opening R${escapeHtml(item.opening_balance)} + In R${escapeHtml(item.total_credits)} − Out R${escapeHtml(item.total_debits)} = Closing R${escapeHtml(item.closing_balance)}<br><span class="${item.reconciliation_status === 'passed' && Number(item.reconciliation_difference) === 0 ? 'good' : 'bad'}">${escapeHtml(item.reconciliation_status.toUpperCase())} · Difference R${escapeHtml(item.reconciliation_difference)}</span></div>`).join('') || '<div class="muted">No statements for this year.</div>';
+      document.querySelector('#allocation-preview').innerHTML = data.allocations.map(item => `<tr><td>${item.direction === 'debit' ? 'Payment' : 'Receipt'}</td><td>${escapeHtml(item.category_name)}</td><td>${escapeHtml(item.allocation_status.replaceAll('_', ' '))}</td><td>${item.transaction_count}</td><td>R${escapeHtml(item.total_amount)}</td><td>${escapeHtml(item.target_sheets.join(', '))}</td></tr>`).join('') || '<tr><td colspan="6">No allocations yet.</td></tr>';
+      document.querySelector('#cashbook-preview').innerHTML = data.rows.map(row => {
+        const requiredType = row.direction === 'debit' ? 'expense' : 'income';
+        const validCategories = categories.filter(category => category.type === requiredType);
+        const options = validCategories.map(category => `<option value="${category.id}" ${category.id === row.category_id ? 'selected' : ''}>${escapeHtml(category.name)}</option>`).join('');
+        const action = row.allocation_status === 'needs_review' ? '<span class="bad">Review above</span>' : `<select id="preview-category-${row.transaction_id}">${options}</select> <button type="button" onclick="updateAllocation(${row.transaction_id})">Update</button>`;
+        const statusClass = row.allocation_status === 'auto_approved' ? 'good' : (row.allocation_status === 'needs_review' ? 'bad' : '');
+        return `<tr><td>${escapeHtml(row.date)}</td><td>${escapeHtml(row.target_sheet)}</td><td>${escapeHtml(row.description)}</td><td class="${row.direction === 'debit' ? 'money-out' : 'money-in'}">${row.direction === 'debit' ? '-' : '+'} R${escapeHtml(row.amount)}</td><td>${escapeHtml(row.category_name || 'Unallocated')}</td><td class="${statusClass}">${escapeHtml(row.allocation_status.replaceAll('_', ' '))}${row.confidence != null ? `<br><span class="muted">${Math.round(row.confidence * 100)}%</span>` : ''}</td><td>${action}</td></tr>`;
+      }).join('') || '<tr><td colspan="7">No transactions for this year.</td></tr>';
+    }
+
+    async function updateAllocation(id) {
+      const categoryId = Number(document.querySelector(`#preview-category-${id}`).value);
+      if (!categoryId) return;
+      const response = await fetch(`/transactions/${id}/review`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({category_id:categoryId, learn:true})});
+      const data = await readJson(response);
+      if (!response.ok) { message.textContent = apiError(data); return; }
+      message.textContent = data.idempotent ? 'Allocation already saved.' : 'Cashbook allocation updated.';
+      await Promise.all([load(), loadPreview(), loadHistory()]);
+    }
+
     async function loadHistory() {
       const [importsResponse, auditResponse] = await Promise.all([fetch('/imports/history?limit=50'), fetch('/audit/history?limit=100')]);
       const imports = await importsResponse.json(); const events = await auditResponse.json();
@@ -197,7 +241,7 @@
       const data = await readJson(response);
       if (!response.ok) { message.textContent = apiError(data); return; }
       message.textContent = data.idempotent ? 'Already saved.' : `Saved as ${data.status}.`;
-      await Promise.all([load(), loadHistory()]);
+      await Promise.all([load(), loadPreview(), loadHistory()]);
     }
 
     async function prepareExport(kind) {
@@ -206,7 +250,7 @@
       if (!response.ok) { message.textContent = apiError(data); return; }
       const ready = kind === 'wced' ? data.ready_for_wced_export : data.ready_for_reviewed_export;
       document.querySelector('#export-dialog-title').textContent = kind === 'wced' ? `Generate ${year} WCED cashbook?` : `Generate ${year} reviewed cashbook?`;
-      document.querySelector('#export-summary').innerHTML = `<div class="summary-grid"><div class="summary-item"><strong>Transactions</strong><br>${data.transaction_count}</div><div class="summary-item"><strong>Reviewed</strong><br>${data.reviewed}</div><div class="summary-item"><strong>Pending</strong><br>${data.pending}</div><div class="summary-item"><strong>Statements</strong><br>${data.statement_count}</div><div class="summary-item"><strong>Money in</strong><br>R${escapeHtml(data.money_in)}</div><div class="summary-item"><strong>Money out</strong><br>R${escapeHtml(data.money_out)}</div><div class="summary-item"><strong>Reconciliation</strong><br><span class="${data.all_statements_reconciled ? 'good' : 'bad'}">${data.all_statements_reconciled ? 'PASSED' : 'NOT READY'}</span></div><div class="summary-item"><strong>Difference</strong><br>R${escapeHtml(data.reconciliation_difference)}</div></div>${kind === 'wced' && !data.wced_template_configured ? '<p class="bad">WCED template is not configured. Open Setup first.</p>' : ''}${ready ? '<p class="good">Ready to export.</p>' : '<p class="bad">Export is blocked until the items above are resolved.</p>'}`;
+      document.querySelector('#export-summary').innerHTML = `<div class="summary-grid"><div class="summary-item"><strong>Transactions</strong><br>${data.transaction_count}</div><div class="summary-item"><strong>Auto-approved</strong><br>${data.auto_approved}</div><div class="summary-item"><strong>Manual</strong><br>${data.manually_approved + data.corrected}</div><div class="summary-item"><strong>Pending</strong><br>${data.pending}</div><div class="summary-item"><strong>Statements</strong><br>${data.statement_count}</div><div class="summary-item"><strong>Money in</strong><br>R${escapeHtml(data.money_in)}</div><div class="summary-item"><strong>Money out</strong><br>R${escapeHtml(data.money_out)}</div><div class="summary-item"><strong>Reconciliation</strong><br><span class="${data.all_statements_reconciled ? 'good' : 'bad'}">${data.all_statements_reconciled ? 'PASSED' : 'NOT READY'}</span></div><div class="summary-item"><strong>Difference</strong><br>R${escapeHtml(data.reconciliation_difference)}</div></div>${kind === 'wced' && !data.wced_template_configured ? '<p class="bad">WCED template is not configured. Open Setup first.</p>' : ''}${ready ? '<p class="good">Ready to export.</p>' : '<p class="bad">Export is blocked until the items above are resolved.</p>'}`;
       pendingExport = ready ? {kind, year} : null;
       document.querySelector('#confirm-export').disabled = !ready;
       exportDialog.showModal();
@@ -237,9 +281,9 @@
       event.preventDefault(); message.textContent = 'Importing and reconciling statement…'; reconciliation.textContent = '';
       const response = await fetch('/statements/upload', {method:'POST', body:new FormData(event.target)}); const data = await readJson(response);
       if (!response.ok) { message.textContent = apiError(data); return; }
-      message.textContent = `${data.transactions_imported} transaction(s) imported; ${data.duplicates_skipped} duplicate(s) skipped; ${data.pending_review} require review.`;
+      message.textContent = `${data.transactions_imported} transaction(s) imported; ${data.auto_approved} auto-approved; ${data.pending_review} require review; ${data.duplicates_skipped} duplicate(s) skipped.`;
       reconciliation.textContent = ['Reconciliation: PASSED', `Opening balance: R${data.reconciliation.opening_balance}`, `Money in: R${data.reconciliation.total_credits}`, `Money out: R${data.reconciliation.total_debits}`, `Closing balance: R${data.reconciliation.closing_balance}`, `Difference: R${data.reconciliation.difference}`].join('\n');
-      yearInput.value = Number(data.period.start.slice(0, 4)); event.target.reset(); await Promise.all([load(), loadHistory(), loadBackups()]);
+      yearInput.value = Number(data.period.start.slice(0, 4)); event.target.reset(); await Promise.all([load(), loadPreview(), loadHistory(), loadBackups()]);
     });
 
     document.querySelector('#category-form').addEventListener('submit', async event => {
@@ -255,6 +299,8 @@
     document.querySelector('#create-backup').addEventListener('click', async () => { const response = await fetch('/backups', {method:'POST'}); const data = await readJson(response); message.textContent = response.ok ? data.message : apiError(data); if (response.ok) await Promise.all([loadBackups(), loadHistory()]); });
     document.querySelector('#refresh-backups').addEventListener('click', loadBackups);
     document.querySelector('#refresh-history').addEventListener('click', loadHistory);
+    document.querySelector('#refresh-preview').addEventListener('click', loadPreview);
+    yearInput.addEventListener('change', loadPreview);
     document.querySelector('#open-setup').addEventListener('click', async () => { await loadSetup(); setupDialog.showModal(); });
     document.querySelector('#close-setup').addEventListener('click', () => setupDialog.close());
     document.querySelector('#reviewed-export').addEventListener('click', () => prepareExport('reviewed'));
@@ -263,7 +309,7 @@
     document.querySelector('#confirm-export').addEventListener('click', async () => { if (!pendingExport) return; const {kind, year} = pendingExport; pendingExport = null; exportDialog.close(); const url = kind === 'wced' ? `/exports/wced-cashbook.xls?year=${year}` : `/exports/reviewed-cashbook.xlsx?year=${year}`; await downloadFile(url); });
 
     yearInput.value = new Date().getFullYear();
-    Promise.all([loadHealth(), load(), loadHistory(), loadBackups(), loadSetup({openWhenIncomplete:true})]).catch(error => { console.error(error); message.textContent = 'Could not load the cashbook. Open Help and download a support bundle if the problem continues.'; });
+    Promise.all([loadHealth(), load(), loadPreview(), loadHistory(), loadBackups(), loadSetup({openWhenIncomplete:true})]).catch(error => { console.error(error); message.textContent = 'Could not load the cashbook. Open Help and download a support bundle if the problem continues.'; });
   </script>
 </body>
 </html>

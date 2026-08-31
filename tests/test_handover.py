@@ -45,7 +45,7 @@ class HandoverApiTests(unittest.TestCase):
         self.assertIn("Bursar Cashbook Help", response.text)
 
     def test_version_bumped_for_handover(self):
-        self.assertEqual(APP_VERSION, "0.3.0")
+        self.assertEqual(APP_VERSION, "0.5.0")
 
     def test_setup_status_reports_missing_categories_and_template(self):
         with tempfile.TemporaryDirectory() as directory:

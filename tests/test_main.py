@@ -1,6 +1,7 @@
 import os
 import unittest
 from io import BytesIO
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -260,12 +261,185 @@ class MainApiTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {"WCED_TEMPLATE_PATH": "fake-template.xls"}),
-            patch("app.main.build_wced_cashbook", return_value=b"fake-xls") as exporter,
+            patch(
+                "app.main.build_wced_cashbook",
+                return_value=SimpleNamespace(content=b"fake-xls", placements=()),
+            ) as exporter,
+            patch("app.main.validate_wced_cashbook") as validator,
         ):
             response = self.client.get("/exports/wced-cashbook.xls?year=2026")
 
         self.assertEqual(response.status_code, 200)
         exporter.assert_called_once()
+        validator.assert_called_once_with(b"fake-xls", ())
+
+    def test_trusted_exact_rule_is_auto_approved_and_populates_preview(self):
+        category_id = self.create_category("Nashua")
+        db = self.session_factory()
+        try:
+            db.add(
+                Rule(
+                    payee_pattern="NASHUA",
+                    category_id=category_id,
+                    confidence=1.0,
+                    hit_count=5,
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        content = (
+            "Transaction Date,Description,Debit,Credit,Balance\n"
+            "01/08/2026,Nashua,100.00,,900.00\n"
+        ).encode()
+        upload = self.client.post(
+            "/statements/upload",
+            data={"bank": "Standard Bank"},
+            files={"file": ("statement.csv", content, "text/csv")},
+        )
+
+        self.assertEqual(upload.status_code, 201)
+        self.assertEqual(upload.json()["auto_approved"], 1)
+        self.assertEqual(upload.json()["pending_review"], 0)
+        self.assertEqual(self.client.get("/transactions/pending").json(), [])
+
+        preview = self.client.get("/cashbook/preview?year=2026").json()
+        self.assertEqual(preview["summary"]["auto_approved"], 1)
+        self.assertEqual(preview["rows"][0]["allocation_status"], "auto_approved")
+        self.assertEqual(preview["rows"][0]["target_sheet"], "Aug PC")
+        self.assertEqual(preview["rows"][0]["category_name"], "Nashua")
+
+    def test_trusted_income_rule_is_auto_approved_after_learning_history(self):
+        category_id = self.create_category("School Fees", "income")
+        db = self.session_factory()
+        try:
+            db.add(
+                Rule(
+                    payee_pattern="SCHOOL FEES",
+                    category_id=category_id,
+                    confidence=1.0,
+                    hit_count=4,
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        content = (
+            "Transaction Date,Description,Debit,Credit,Balance\n"
+            "01/08/2026,School fees,,250.00,1250.00\n"
+        ).encode()
+        upload = self.client.post(
+            "/statements/upload",
+            data={"bank": "Standard Bank"},
+            files={"file": ("statement.csv", content, "text/csv")},
+        )
+
+        self.assertEqual(upload.status_code, 201)
+        self.assertEqual(upload.json()["auto_approved"], 1)
+        self.assertEqual(upload.json()["pending_review"], 0)
+        preview = self.client.get("/cashbook/preview?year=2026").json()
+        self.assertEqual(preview["rows"][0]["target_sheet"], "Aug RC")
+        self.assertEqual(preview["rows"][0]["category_name"], "School Fees")
+
+    def test_exact_rule_below_trust_threshold_stays_pending(self):
+        category_id = self.create_category("Stationery")
+        db = self.session_factory()
+        try:
+            db.add(
+                Rule(
+                    payee_pattern="PAPER SUPPLIER",
+                    category_id=category_id,
+                    confidence=0.90,
+                    hit_count=10,
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        content = (
+            "Transaction Date,Description,Debit,Credit,Balance\n"
+            "01/08/2026,Paper supplier,100.00,,900.00\n"
+        ).encode()
+        upload = self.client.post(
+            "/statements/upload",
+            data={"bank": "Standard Bank"},
+            files={"file": ("statement.csv", content, "text/csv")},
+        )
+
+        self.assertEqual(upload.json()["auto_approved"], 0)
+        self.assertEqual(upload.json()["pending_review"], 1)
+
+    def test_exact_rule_with_too_few_hits_stays_pending(self):
+        category_id = self.create_category("Stationery")
+        db = self.session_factory()
+        try:
+            db.add(
+                Rule(
+                    payee_pattern="PAPER SUPPLIER",
+                    category_id=category_id,
+                    confidence=1.0,
+                    hit_count=2,
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        content = (
+            "Transaction Date,Description,Debit,Credit,Balance\n"
+            "01/08/2026,Paper supplier,100.00,,900.00\n"
+        ).encode()
+        upload = self.client.post(
+            "/statements/upload",
+            data={"bank": "Standard Bank"},
+            files={"file": ("statement.csv", content, "text/csv")},
+        )
+
+        self.assertEqual(upload.json()["auto_approved"], 0)
+        self.assertEqual(upload.json()["pending_review"], 1)
+
+    def test_auto_approved_allocation_can_be_corrected_from_preview(self):
+        first_category = self.create_category("Nashua")
+        second_category = self.create_category("Printing")
+        db = self.session_factory()
+        try:
+            db.add(
+                Rule(
+                    payee_pattern="NASHUA",
+                    category_id=first_category,
+                    confidence=1.0,
+                    hit_count=5,
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        content = (
+            "Transaction Date,Description,Debit,Credit,Balance\n"
+            "01/08/2026,Nashua,100.00,,900.00\n"
+        ).encode()
+        self.client.post(
+            "/statements/upload",
+            data={"bank": "Standard Bank"},
+            files={"file": ("statement.csv", content, "text/csv")},
+        )
+        preview = self.client.get("/cashbook/preview?year=2026").json()
+        transaction_id = preview["rows"][0]["transaction_id"]
+
+        corrected = self.client.post(
+            f"/transactions/{transaction_id}/review",
+            json={"category_id": second_category, "learn": True},
+        )
+        self.assertEqual(corrected.status_code, 200)
+        self.assertEqual(corrected.json()["status"], "corrected")
+
+        preview = self.client.get("/cashbook/preview?year=2026").json()
+        self.assertEqual(preview["rows"][0]["category_name"], "Printing")
+        self.assertEqual(preview["rows"][0]["allocation_status"], "corrected")
 
     def test_xlsx_export_neutralises_formula_text(self):
         category_id = self.create_category("Stationery")

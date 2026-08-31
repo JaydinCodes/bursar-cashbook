@@ -8,7 +8,7 @@ Single-bursar Standard Bank prototype for importing, reconciling, reviewing and 
 - Debit/credit structure is validated before import.
 - Running balances must reconcile before import succeeds.
 - Existing transactions are fingerprinted and skipped on overlapping statement imports.
-- Every new transaction requires human review before export.
+- Trusted exact historical matches are auto-approved; only uncertain transactions require review.
 - Exports are financial-year scoped and blocked while that year has pending transactions.
 - Review retries are idempotent and category corrections move, rather than duplicate, classifier learning votes.
 
@@ -76,3 +76,17 @@ For a Windows handover:
 The local template is stored at `config/wced-template.xls` and is ignored by Git.
 
 Do not delete `cashbook.db` when applying Phase 3 over the tested Phase 2 prototype.
+
+
+## Phase 5 actual automation
+
+Phase 5 keeps the local single-bursar handover model and automates the actual statement-to-cashbook workflow:
+
+- Exact expense matches auto-approve only at >=95% historical confidence and >=3 prior hits.
+- Fuzzy matches and new descriptions remain manual exceptions; income becomes eligible after consistent learned history exists.
+- `/cashbook/preview` exposes the target monthly PC/RC sheet, category allocation, automation status and reconciliation context for every transaction.
+- Automatic allocations remain editable before export.
+- The WCED `.xls` is generated from the configured real blank template.
+- The generated workbook is reopened and every intended date, amount and category cell is validated before download.
+
+No database reset or reseed is required when applying Phase 5 over Phase 3.
