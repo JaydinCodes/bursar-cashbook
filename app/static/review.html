@@ -9,11 +9,15 @@
     body { max-width: 1180px; margin: 2rem auto; padding: 0 1rem 3rem; }
     h1 { margin-bottom: .2rem; }
     h2 { margin-top: 2rem; }
+    h3 { margin-bottom: .4rem; }
     .muted { color: #64748b; }
     .panel { background: white; border: 1px solid #dbe3ed; border-radius: .5rem; padding: 1rem; margin-top: 1rem; }
-    form { display: flex; gap: .75rem; flex-wrap: wrap; align-items: end; }
+    .header-row { display: flex; gap: .75rem; align-items: baseline; flex-wrap: wrap; }
+    .version { background: #e2e8f0; border-radius: 999px; padding: .2rem .55rem; font-size: .82rem; }
+    form, .actions { display: flex; gap: .75rem; flex-wrap: wrap; align-items: end; }
     label { display: grid; gap: .3rem; }
     button, .button { background: #0f766e; color: white; border: 0; border-radius: .3rem; padding: .65rem .9rem; cursor: pointer; text-decoration: none; font: inherit; }
+    button.secondary, .button.secondary { background: #475569; }
     button:disabled { opacity: .55; cursor: not-allowed; }
     input, select { min-height: 2.25rem; padding: 0 .45rem; border: 1px solid #cbd5e1; border-radius: .3rem; background: white; }
     select { min-width: 220px; }
@@ -24,6 +28,14 @@
     #reconciliation { white-space: pre-line; }
     .money-out { color: #991b1b; }
     .money-in { color: #166534; }
+    .status-pass { color: #166534; font-weight: 700; }
+    .support-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+    .scroll { max-height: 320px; overflow: auto; border: 1px solid #e2e8f0; border-radius: .4rem; }
+    .scroll table { margin: 0; }
+    .event-details { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .82rem; white-space: pre-wrap; }
+    @media (max-width: 900px) {
+      .support-grid { grid-template-columns: 1fr; }
+    }
     @media (max-width: 760px) {
       table { display: block; overflow-x: auto; }
       .button, button { width: 100%; text-align: center; }
@@ -31,7 +43,10 @@
   </style>
 </head>
 <body>
-  <h1>Bursar Cashbook Review</h1>
+  <div class="header-row">
+    <h1>Bursar Cashbook Review</h1>
+    <span id="app-version" class="version">Loading version…</span>
+  </div>
   <p class="muted">Standard Bank prototype. Every imported transaction requires bursar review before export.</p>
 
   <section class="panel">
@@ -101,6 +116,41 @@
     <tbody id="rows"></tbody>
   </table>
 
+  <section class="panel">
+    <h2>Support & history</h2>
+    <p class="muted">If something breaks, download the diagnostic report and send the ZIP to the developer. It excludes full transaction descriptions and bank references.</p>
+    <div class="actions">
+      <a class="button" href="/diagnostics/export">Download diagnostic report</a>
+      <button class="secondary" type="button" id="refresh-history">Refresh history</button>
+    </div>
+
+    <div class="support-grid">
+      <div>
+        <h3>Import history</h3>
+        <div class="scroll">
+          <table>
+            <thead>
+              <tr><th>When</th><th>Period</th><th>Imported</th><th>Review</th><th>Recon</th></tr>
+            </thead>
+            <tbody id="import-history"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div>
+        <h3>Audit history</h3>
+        <div class="scroll">
+          <table>
+            <thead>
+              <tr><th>When</th><th>Event</th><th>Details</th></tr>
+            </thead>
+            <tbody id="audit-history"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <script>
     let categories = [];
     const message = document.querySelector('#message');
@@ -113,10 +163,27 @@
       '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
     }[char]));
 
+    function formatDateTime(value) {
+      if (!value) return '';
+      const parsed = new Date(value);
+      return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString();
+    }
+
+    function apiError(data, fallback = 'Request failed.') {
+      const detail = data?.detail || fallback;
+      return data?.error_id ? `${detail} Error ID: ${data.error_id}` : detail;
+    }
+
     function updateExportLinks() {
       const year = Number(yearInput.value);
       reviewedExport.href = `/exports/reviewed-cashbook.xlsx?year=${year}`;
       wcedExport.href = `/exports/wced-cashbook.xls?year=${year}`;
+    }
+
+    async function loadHealth() {
+      const response = await fetch('/health');
+      const data = await response.json();
+      document.querySelector('#app-version').textContent = `Prototype v${data.version}`;
     }
 
     async function load() {
@@ -159,6 +226,34 @@
       }).join('') || '<tr><td colspan="7">Nothing waiting for review.</td></tr>';
     }
 
+    async function loadHistory() {
+      const [importsResponse, auditResponse] = await Promise.all([
+        fetch('/imports/history?limit=50'),
+        fetch('/audit/history?limit=100')
+      ]);
+
+      const imports = await importsResponse.json();
+      const events = await auditResponse.json();
+
+      document.querySelector('#import-history').innerHTML = imports.map(item => (
+        `<tr>
+          <td>${escapeHtml(formatDateTime(item.uploaded_at))}</td>
+          <td>${escapeHtml(item.period_start)} → ${escapeHtml(item.period_end)}</td>
+          <td>${item.transactions_imported}/${item.source_transactions}<br><span class="muted">${item.duplicates_skipped} duplicate(s)</span></td>
+          <td>${item.pending} pending<br>${item.approved} approved<br>${item.corrected} corrected</td>
+          <td class="status-pass">${escapeHtml(item.reconciliation_status.toUpperCase())}<br><span class="muted">Δ R${escapeHtml(item.reconciliation_difference)}</span></td>
+        </tr>`
+      )).join('') || '<tr><td colspan="5">No imports yet.</td></tr>';
+
+      document.querySelector('#audit-history').innerHTML = events.map(event => (
+        `<tr>
+          <td>${escapeHtml(formatDateTime(event.created_at))}</td>
+          <td>${escapeHtml(event.event_type)}</td>
+          <td class="event-details">${escapeHtml(JSON.stringify(event.details))}</td>
+        </tr>`
+      )).join('') || '<tr><td colspan="3">No audit events yet.</td></tr>';
+    }
+
     async function review(id) {
       const categoryId = Number(document.querySelector(`#category-${id}`).value);
       if (!categoryId) {
@@ -174,14 +269,12 @@
       const data = await response.json();
 
       if (!response.ok) {
-        message.textContent = data.detail;
+        message.textContent = apiError(data);
         return;
       }
 
-      message.textContent = data.idempotent
-        ? 'Already saved.'
-        : `Saved as ${data.status}.`;
-      await load();
+      message.textContent = data.idempotent ? 'Already saved.' : `Saved as ${data.status}.`;
+      await Promise.all([load(), loadHistory()]);
     }
 
     document.querySelector('#upload-form').addEventListener('submit', async event => {
@@ -196,7 +289,7 @@
       const data = await response.json();
 
       if (!response.ok) {
-        message.textContent = data.detail;
+        message.textContent = apiError(data);
         return;
       }
 
@@ -213,7 +306,7 @@
       yearInput.value = Number(data.period.start.slice(0, 4));
       updateExportLinks();
       event.target.reset();
-      await load();
+      await Promise.all([load(), loadHistory()]);
     });
 
     document.querySelector('#category-form').addEventListener('submit', async event => {
@@ -226,17 +319,25 @@
       });
       const data = await response.json();
 
-      message.textContent = response.ok ? `${data.name} added.` : data.detail;
+      message.textContent = response.ok ? `${data.name} added.` : apiError(data);
       if (response.ok) {
         event.target.reset();
-        await load();
+        await Promise.all([load(), loadHistory()]);
       }
+    });
+
+    document.querySelector('#refresh-history').addEventListener('click', () => {
+      loadHistory().catch(error => {
+        console.error(error);
+        message.textContent = 'Could not refresh history.';
+      });
     });
 
     yearInput.value = new Date().getFullYear();
     yearInput.addEventListener('input', updateExportLinks);
     updateExportLinks();
-    load().catch(error => {
+
+    Promise.all([loadHealth(), load(), loadHistory()]).catch(error => {
       console.error(error);
       message.textContent = 'Could not load the review screen.';
     });

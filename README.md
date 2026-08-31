@@ -1,58 +1,63 @@
-# Bursar Cashbook Automation — Phase 1
+# Bursar Cashbook Automation
 
-Single-bursar, Standard Bank prototype focused on financial correctness.
+Single-bursar Standard Bank prototype for importing, reconciling, reviewing and exporting WCED cashbook transactions.
 
-## Phase 1 guarantees
+## Prototype guarantees
 
-- Standard Bank only.
-- Strict debit/credit validation.
-- Running-balance reconciliation before import.
-- Exact file duplicate protection plus transaction fingerprints for overlapping exports.
-- Every imported transaction remains pending until a bursar reviews it.
-- Review requests are idempotent and category corrections move the learning vote instead of double-counting it.
-- Exports require a financial year and are blocked while that year has pending transactions.
-- WCED HTTP export naming collision fixed.
+- Standard Bank CSV/XLS/XLSX only.
+- Debit/credit structure is validated before import.
+- Running balances must reconcile before import succeeds.
+- Existing transactions are fingerprinted and skipped on overlapping statement imports.
+- Every new transaction requires human review before export.
+- Exports are financial-year scoped and blocked while that year has pending transactions.
+- Review retries are idempotent and category corrections move, rather than duplicate, classifier learning votes.
 
-## Setup
+## Supportability
 
-Python 3.11+ recommended.
+Phase 2 adds local support tooling without adding multi-user production infrastructure:
 
-```bash
-python -m venv .venv
-```
+- JSON application logs in `logs/cashbook.log` with rotation.
+- Append-only application audit events stored in SQLite.
+- Import history and audit history visible in the review screen.
+- Unexpected failures return support-friendly IDs such as `ERR-20260831-A1B2C3D4`.
+- `Download diagnostic report` creates a privacy-reduced ZIP containing app/system metadata, recent import summaries, audit history and the application log tail.
+- Automatic SQLite backups are created at startup (once per day) and immediately before statement imports. The newest 10 are retained by default.
+- App version is shown in the UI and `/health` response.
 
-Windows PowerShell:
+Diagnostics intentionally exclude full transaction descriptions, bank references and complete statement data. Application logs should likewise log IDs/counts rather than transaction descriptions.
+
+## Install
 
 ```powershell
-.\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-```
-
-For the first Phase 1 run, recreate the prototype database because `create_all()` does not migrate the old schema:
-
-```powershell
-Remove-Item cashbook.db -ErrorAction SilentlyContinue
 python seed.py data/2020_cashbook.xls
+python -m unittest discover -s tests -v
 ```
 
-Configure the blank WCED template:
+Set the blank WCED template:
 
 ```powershell
 $env:WCED_TEMPLATE_PATH = "C:\path\to\blank-WCED-cashbook.xls"
 ```
 
-Run:
+Start the prototype:
 
 ```powershell
 uvicorn app.main:app --reload
 ```
 
-Open <http://127.0.0.1:8000/>.
+Open `http://127.0.0.1:8000/`.
 
-## Tests
+## Phase 2 upgrade note
 
-```bash
-python -m unittest discover -s tests -v
+If you already applied Phase 1, **do not delete or recreate `cashbook.db`**. Starting the app after this patch adds the new `audit_events` table with `create_all()` while preserving the existing categories, rules, statements and transactions.
+
+## Local support configuration
+
+Optional environment variables:
+
+```powershell
+$env:CASHBOOK_LOG_DIR = "logs"
+$env:CASHBOOK_BACKUP_DIR = "backups"
+$env:CASHBOOK_BACKUP_RETENTION = "10"
 ```
-
-The legacy WCED workbook test is skipped automatically when its historical fixture or the `xlrd`/`xlutils` packages are not available.

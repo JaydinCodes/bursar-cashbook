@@ -1,16 +1,18 @@
-from datetime import date
+from datetime import date, datetime
 from hashlib import sha256
 from io import BytesIO
 import os
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from .audit import audit_event_to_dict, record_audit_event
+from .backups import create_sqlite_backup
 from .bank_parser import StatementParseError, parse_statement
 from .categorize import (
     categorize,
@@ -18,17 +20,21 @@ from .categorize import (
     move_learning_vote,
     normalize_payee,
 )
-from .db import SessionLocal, init_db
+from .db import SessionLocal, engine, init_db
+from .diagnostics import build_diagnostics_zip
+from .errors import new_error_id
 from .fingerprints import standard_bank_transaction_fingerprint
-from .models import Category, Statement, Transaction
+from .logging_config import logger
+from .models import AuditEvent, Category, Statement, Transaction
 from .reconciliation import StatementReconciliationError, reconcile_statement
+from .version import APP_VERSION
 from .wced_export import (
     WcedExportError,
     WcedTransaction,
     export_wced_cashbook as build_wced_cashbook,
 )
 
-app = FastAPI(title="Bursar Cashbook Automation")
+app = FastAPI(title="Bursar Cashbook Automation", version=APP_VERSION)
 REVIEW_PAGE = Path(__file__).parent / "static" / "review.html"
 FINAL_STATUSES = ("approved", "corrected")
 MAX_UPLOAD_BYTES = 15 * 1024 * 1024
@@ -46,12 +52,72 @@ class CategoryCreate(BaseModel):
 
 @app.on_event("startup")
 def startup() -> None:
+    backup_path = create_sqlite_backup(engine, "startup", once_per_day=True)
     init_db()
+    logger.info(
+        "application_started",
+        extra={
+            "app_version": APP_VERSION,
+            "backup_created": bool(backup_path),
+        },
+    )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    error_id = new_error_id()
+    logger.exception(
+        "unhandled_application_error",
+        extra={
+            "error_id": error_id,
+            "method": request.method,
+            "path": request.url.path,
+            "exception_type": type(exc).__name__,
+        },
+    )
+
+    db = SessionLocal()
+    try:
+        record_audit_event(
+            db,
+            "application.error",
+            entity_type="request",
+            details={
+                "error_id": error_id,
+                "method": request.method,
+                "path": request.url.path,
+                "exception_type": type(exc).__name__,
+            },
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception(
+            "failed_to_persist_error_audit_event",
+            extra={"error_id": error_id},
+        )
+    finally:
+        db.close()
+
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": (
+                "Something unexpected went wrong. Please send the error ID "
+                "or download the diagnostic report."
+            ),
+            "error_id": error_id,
+        },
+    )
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "bank": "Standard Bank"}
+    return {
+        "status": "ok",
+        "bank": "Standard Bank",
+        "version": APP_VERSION,
+    }
 
 
 @app.get("/", include_in_schema=False)
@@ -86,9 +152,7 @@ def _ensure_year_ready_for_export(db: Session, year: int) -> None:
     if pending:
         raise HTTPException(
             status_code=409,
-            detail=(
-                f"{pending} transaction(s) for {year} still require review before export."
-            ),
+            detail=f"{pending} transaction(s) for {year} still require review before export.",
         )
 
     invalid_final = year_transactions.filter(
@@ -125,11 +189,87 @@ def _reviewed_transactions_for_year(db: Session, year: int) -> list[Transaction]
 def _excel_safe_text(value: str | None) -> str | None:
     if value is None:
         return None
-
     if value.startswith(("=", "+", "-", "@")):
         return f"'{value}"
-
     return value
+
+
+def _statement_history_item(db: Session, statement: Statement) -> dict:
+    counts = {"pending": 0, "approved": 0, "corrected": 0}
+    rows = (
+        db.query(Transaction.status)
+        .filter(Transaction.statement_id == statement.id)
+        .all()
+    )
+    for (status,) in rows:
+        counts[status] = counts.get(status, 0) + 1
+
+    return {
+        "id": statement.id,
+        "bank": statement.bank,
+        "source_filename": statement.source_filename,
+        "uploaded_at": statement.uploaded_at.isoformat() if statement.uploaded_at else None,
+        "period_start": statement.period_start.isoformat(),
+        "period_end": statement.period_end.isoformat(),
+        "financial_year": statement.financial_year,
+        "source_transactions": statement.source_transaction_count,
+        "transactions_imported": statement.imported_transaction_count,
+        "duplicates_skipped": statement.duplicate_transaction_count,
+        "pending": counts["pending"],
+        "approved": counts["approved"],
+        "corrected": counts["corrected"],
+        "reconciliation_status": statement.reconciliation_status,
+        "reconciliation_difference": str(statement.reconciliation_difference),
+    }
+
+
+@app.get("/imports/history")
+def import_history(
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+):
+    statements = (
+        db.query(Statement)
+        .order_by(Statement.uploaded_at.desc(), Statement.id.desc())
+        .limit(limit)
+        .all()
+    )
+    return [_statement_history_item(db, statement) for statement in statements]
+
+
+@app.get("/audit/history")
+def audit_history(
+    limit: int = Query(100, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    events = (
+        db.query(AuditEvent)
+        .order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc())
+        .limit(limit)
+        .all()
+    )
+    return [audit_event_to_dict(event) for event in events]
+
+
+@app.get("/diagnostics/export")
+def export_diagnostics(db: Session = Depends(get_db)):
+    record_audit_event(
+        db,
+        "diagnostics.exported",
+        entity_type="application",
+        details={"app_version": APP_VERSION},
+    )
+    db.commit()
+
+    content = build_diagnostics_zip(db)
+    filename = f"bursar-diagnostics-{datetime.now().astimezone():%Y%m%d-%H%M%S}.zip"
+    logger.info("diagnostics_exported", extra={"app_version": APP_VERSION})
+
+    return StreamingResponse(
+        BytesIO(content),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.post("/statements/upload", status_code=201)
@@ -150,11 +290,24 @@ async def upload_statement(
             detail="Statement is too large. Maximum upload size is 15 MB.",
         )
 
+    logger.info(
+        "statement_import_started",
+        extra={
+            "bank": bank,
+            "file_extension": Path(filename).suffix.lower(),
+            "file_size_bytes": len(content),
+        },
+    )
+
     source_hash = sha256(content).hexdigest()
     duplicate_statement = (
         db.query(Statement).filter(Statement.source_hash == source_hash).first()
     )
     if duplicate_statement:
+        logger.warning(
+            "duplicate_statement_rejected",
+            extra={"existing_statement_id": duplicate_statement.id},
+        )
         raise HTTPException(
             status_code=409,
             detail=(
@@ -167,6 +320,10 @@ async def upload_statement(
         parsed = parse_statement(filename, content, bank=bank)
         reconciliation = reconcile_statement(parsed)
     except (StatementParseError, StatementReconciliationError) as exc:
+        logger.warning(
+            "statement_validation_failed",
+            extra={"validation_type": type(exc).__name__},
+        )
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     transactions_with_fingerprints = [
@@ -182,6 +339,10 @@ async def upload_statement(
         fingerprint for fingerprint, count in fingerprint_counts.items() if count > 1
     ]
     if repeated_in_source:
+        logger.warning(
+            "duplicate_rows_in_statement_rejected",
+            extra={"duplicate_fingerprint_count": len(repeated_in_source)},
+        )
         raise HTTPException(
             status_code=422,
             detail=(
@@ -208,10 +369,18 @@ async def upload_statement(
     duplicate_count = len(parsed.transactions) - len(new_transactions)
 
     if not new_transactions:
+        logger.warning(
+            "fully_overlapping_statement_rejected",
+            extra={"source_transaction_count": len(parsed.transactions)},
+        )
         raise HTTPException(
             status_code=409,
             detail="Every transaction in this statement has already been imported.",
         )
+
+    backup_path = create_sqlite_backup(db.get_bind(), "before-import")
+    if backup_path:
+        logger.info("database_backup_created", extra={"reason": "before-import"})
 
     period_start = min(transaction.txn_date for transaction in parsed.transactions)
     period_end = max(transaction.txn_date for transaction in parsed.transactions)
@@ -271,8 +440,35 @@ async def upload_statement(
             )
         )
 
+    record_audit_event(
+        db,
+        "statement.imported",
+        entity_type="statement",
+        entity_id=statement.id,
+        details={
+            "bank": "Standard Bank",
+            "financial_year": financial_year,
+            "source_transactions": len(parsed.transactions),
+            "transactions_imported": len(new_transactions),
+            "duplicates_skipped": duplicate_count,
+            "reconciliation_status": "passed",
+            "reconciliation_difference": str(reconciliation.difference),
+        },
+    )
+
     db.commit()
     db.refresh(statement)
+
+    logger.info(
+        "statement_import_completed",
+        extra={
+            "statement_id": statement.id,
+            "transactions_imported": len(new_transactions),
+            "duplicates_skipped": duplicate_count,
+            "financial_year": financial_year,
+            "reconciliation_difference": str(reconciliation.difference),
+        },
+    )
 
     return {
         "statement_id": statement.id,
@@ -339,9 +535,7 @@ def pending_transactions(db: Session = Depends(get_db)):
 def categories(db: Session = Depends(get_db)):
     return [
         {"id": category.id, "name": category.name, "type": category.type}
-        for category in (
-            db.query(Category).order_by(Category.type, Category.name).all()
-        )
+        for category in db.query(Category).order_by(Category.type, Category.name).all()
     ]
 
 
@@ -359,17 +553,27 @@ def create_category(category_input: CategoryCreate, db: Session = Depends(get_db
             detail="Category type must be expense or income.",
         )
 
-    existing = (
-        db.query(Category).filter_by(name=name, type=category_type).first()
-    )
+    existing = db.query(Category).filter_by(name=name, type=category_type).first()
     if existing:
         raise HTTPException(status_code=409, detail="That category already exists.")
 
     category = Category(name=name, type=category_type)
     db.add(category)
+    db.flush()
+    record_audit_event(
+        db,
+        "category.created",
+        entity_type="category",
+        entity_id=category.id,
+        details={"name": category.name, "type": category.type},
+    )
     db.commit()
     db.refresh(category)
 
+    logger.info(
+        "category_created",
+        extra={"category_id": category.id, "category_type": category.type},
+    )
     return {"id": category.id, "name": category.name, "type": category.type}
 
 
@@ -397,6 +601,8 @@ def review_transaction(
             ),
         )
 
+    previous_category_id = transaction.category_id
+    previous_status = transaction.status
     same_final_category = (
         transaction.status in FINAL_STATUSES and transaction.category_id == category.id
     )
@@ -419,6 +625,10 @@ def review_transaction(
             learning_changed = True
 
     if same_final_category and not learning_changed:
+        logger.info(
+            "transaction_review_idempotent_retry",
+            extra={"transaction_id": transaction.id, "category_id": category.id},
+        )
         return {
             "transaction_id": transaction.id,
             "status": transaction.status,
@@ -434,7 +644,32 @@ def review_transaction(
         else "corrected"
     )
 
+    record_audit_event(
+        db,
+        "transaction.reviewed",
+        entity_type="transaction",
+        entity_id=transaction.id,
+        details={
+            "statement_id": transaction.statement_id,
+            "previous_category_id": previous_category_id,
+            "category_id": category.id,
+            "previous_status": previous_status,
+            "status": transaction.status,
+            "learning_changed": learning_changed,
+        },
+    )
     db.commit()
+
+    logger.info(
+        "transaction_reviewed",
+        extra={
+            "transaction_id": transaction.id,
+            "statement_id": transaction.statement_id,
+            "category_id": category.id,
+            "status": transaction.status,
+            "learning_changed": learning_changed,
+        },
+    )
 
     return {
         "transaction_id": transaction.id,
@@ -510,13 +745,24 @@ def export_reviewed_cashbook(
     workbook.save(stream)
     stream.seek(0)
 
+    record_audit_event(
+        db,
+        "export.reviewed_cashbook",
+        entity_type="financial_year",
+        entity_id=year,
+        details={"year": year, "transaction_count": len(transactions)},
+    )
+    db.commit()
+    logger.info(
+        "reviewed_cashbook_exported",
+        extra={"year": year, "transaction_count": len(transactions)},
+    )
+
     return StreamingResponse(
         stream,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={
-            "Content-Disposition": (
-                f'attachment; filename="reviewed-cashbook-{year}.xlsx"'
-            )
+            "Content-Disposition": f'attachment; filename="reviewed-cashbook-{year}.xlsx"'
         },
     )
 
@@ -552,7 +798,24 @@ def download_wced_cashbook(
     try:
         content = build_wced_cashbook(template_path, records)
     except WcedExportError as exc:
+        logger.warning(
+            "wced_export_validation_failed",
+            extra={"year": year, "validation_type": type(exc).__name__},
+        )
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    record_audit_event(
+        db,
+        "export.wced_cashbook",
+        entity_type="financial_year",
+        entity_id=year,
+        details={"year": year, "transaction_count": len(transactions)},
+    )
+    db.commit()
+    logger.info(
+        "wced_cashbook_exported",
+        extra={"year": year, "transaction_count": len(transactions)},
+    )
 
     return StreamingResponse(
         BytesIO(content),

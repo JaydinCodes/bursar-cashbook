@@ -1,0 +1,1585 @@
+diff --git a/.gitignore b/.gitignore
+index eeb7bca..db3b9b0 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -13,3 +13,4 @@ exports/
+ data/private/
+ scripts/node_modules/
+ *.db-journal
++config/*.xls
+diff --git a/README.md b/README.md
+index 2742e41..4317be8 100644
+--- a/README.md
++++ b/README.md
+@@ -61,3 +61,18 @@ $env:CASHBOOK_LOG_DIR = "logs"
+ $env:CASHBOOK_BACKUP_DIR = "backups"
+ $env:CASHBOOK_BACKUP_RETENTION = "10"
+ ```
++
++## Phase 3 pilot handover
++
++This build includes a local setup wizard, Windows setup/start scripts, export preflight confirmation, backup/restore controls, a Help page, support documentation, and the pilot checklist.
++
++For a Windows handover:
++
++1. Run `SETUP CASHBOOK.bat` once if `.venv` has not been created.
++2. Run `START CASHBOOK.bat` for normal use.
++3. Open **Setup** and ensure all readiness checks are green.
++4. Upload the blank WCED `.xls` template through Setup if it is not already configured.
++
++The local template is stored at `config/wced-template.xls` and is ignored by Git.
++
++Do not delete `cashbook.db` when applying Phase 3 over the tested Phase 2 prototype.
+diff --git a/SETUP CASHBOOK.bat b/SETUP CASHBOOK.bat
+new file mode 100644
+index 0000000..503437b
+--- /dev/null
++++ b/SETUP CASHBOOK.bat	
+@@ -0,0 +1,62 @@
++@echo off
++setlocal
++cd /d "%~dp0"
++title Bursar Cashbook Setup
++
++echo ========================================
++echo        BURSAR CASHBOOK SETUP
++echo ========================================
++echo.
++
++set "PYTHON_CMD="
++where py >nul 2>nul && set "PYTHON_CMD=py -3"
++if not defined PYTHON_CMD (
++  where python >nul 2>nul && set "PYTHON_CMD=python"
++)
++
++if not defined PYTHON_CMD (
++  echo Python 3 is not installed or is not available in PATH.
++  echo Please contact support.
++  pause
++  exit /b 1
++)
++
++if not exist ".venv\Scripts\python.exe" (
++  echo Creating the local Python environment...
++  %PYTHON_CMD% -m venv .venv
++  if errorlevel 1 goto :failed
++)
++
++echo Installing Cashbook requirements...
++".venv\Scripts\python.exe" -m pip install --upgrade pip
++if errorlevel 1 goto :failed
++".venv\Scripts\python.exe" -m pip install -r requirements.txt
++if errorlevel 1 goto :failed
++
++if not exist "cashbook.db" (
++  if exist "data\2020_cashbook.xls" (
++    echo Creating the initial Cashbook database...
++    ".venv\Scripts\python.exe" seed.py "data\2020_cashbook.xls"
++    if errorlevel 1 goto :failed
++  ) else (
++    echo.
++    echo No existing cashbook.db or seed workbook was found.
++    echo Contact support before processing real statements.
++  )
++)
++
++if not exist "config" mkdir config
++if not exist "backups" mkdir backups
++if not exist "logs" mkdir logs
++
++echo.
++echo Setup completed successfully.
++echo You can now double-click START CASHBOOK.bat.
++pause
++exit /b 0
++
++:failed
++echo.
++echo Setup failed. Please send a screenshot of this window to support.
++pause
++exit /b 1
+diff --git a/START CASHBOOK.bat b/START CASHBOOK.bat
+new file mode 100644
+index 0000000..dfe3ef6
+--- /dev/null
++++ b/START CASHBOOK.bat	
+@@ -0,0 +1,38 @@
++@echo off
++setlocal
++cd /d "%~dp0"
++title Bursar Cashbook
++
++if not exist ".venv\Scripts\python.exe" (
++  echo Cashbook setup has not been completed.
++  echo Please run SETUP CASHBOOK.bat first.
++  pause
++  exit /b 1
++)
++
++if not exist "cashbook.db" (
++  echo The Cashbook database is missing.
++  echo Please contact support before continuing.
++  pause
++  exit /b 1
++)
++
++start "" powershell -NoProfile -WindowStyle Hidden -Command "Start-Sleep -Seconds 2; Start-Process 'http://127.0.0.1:8000'"
++
++echo ========================================
++echo          BURSAR CASHBOOK
++echo ========================================
++echo.
++echo The Cashbook is running locally.
++echo Keep this window open while you work.
++echo Close it or press Ctrl+C when finished.
++echo.
++
++".venv\Scripts\python.exe" -m uvicorn app.main:app --host 127.0.0.1 --port 8000
++
++if errorlevel 1 (
++  echo.
++  echo The Cashbook stopped unexpectedly.
++  echo Please send a screenshot of this window and a support bundle to the developer.
++  pause
++)
+diff --git a/app/backups.py b/app/backups.py
+index 594f62d..4c8d485 100644
+--- a/app/backups.py
++++ b/app/backups.py
+@@ -8,6 +8,7 @@ from sqlalchemy.engine import Engine
+ 
+ BACKUP_DIR = Path(os.getenv("CASHBOOK_BACKUP_DIR", "backups"))
+ BACKUP_RETENTION = max(1, int(os.getenv("CASHBOOK_BACKUP_RETENTION", "10")))
++BACKUP_NAME_RE = re.compile(r"^cashbook-\d{8}-\d{6}-\d{6}-[A-Za-z0-9_-]+\.db$")
+ 
+ 
+ def _safe_reason(reason: str) -> str:
+@@ -15,7 +16,7 @@ def _safe_reason(reason: str) -> str:
+     return cleaned or "backup"
+ 
+ 
+-def _sqlite_file_from_engine(engine: Engine) -> Path | None:
++def sqlite_file_from_engine(engine: Engine) -> Path | None:
+     if engine.url.get_backend_name() != "sqlite":
+         return None
+ 
+@@ -42,7 +43,7 @@ def create_sqlite_backup(
+     *,
+     once_per_day: bool = False,
+ ) -> Path | None:
+-    source_path = _sqlite_file_from_engine(engine)
++    source_path = sqlite_file_from_engine(engine)
+     if source_path is None or not source_path.exists():
+         return None
+ 
+@@ -70,3 +71,78 @@ def create_sqlite_backup(
+ 
+     _prune_backups()
+     return destination
++
++
++def list_sqlite_backups() -> list[dict]:
++    if not BACKUP_DIR.exists():
++        return []
++
++    items = []
++    for path in sorted(
++        BACKUP_DIR.glob("cashbook-*.db"),
++        key=lambda item: item.stat().st_mtime,
++        reverse=True,
++    ):
++        stat = path.stat()
++        items.append(
++            {
++                "filename": path.name,
++                "size_bytes": stat.st_size,
++                "modified_at": datetime.fromtimestamp(stat.st_mtime).astimezone().isoformat(),
++            }
++        )
++    return items
++
++
++def _resolve_backup(filename: str) -> Path:
++    if not BACKUP_NAME_RE.fullmatch(filename):
++        raise ValueError("Invalid backup filename.")
++
++    backup_root = BACKUP_DIR.resolve()
++    path = (BACKUP_DIR / filename).resolve()
++    if path.parent != backup_root or not path.is_file():
++        raise ValueError("Backup was not found.")
++    return path
++
++
++def _validate_sqlite_backup(path: Path) -> None:
++    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
++    try:
++        integrity = connection.execute("PRAGMA integrity_check").fetchone()
++        if not integrity or integrity[0] != "ok":
++            raise ValueError("Backup failed SQLite integrity validation.")
++
++        tables = {
++            row[0]
++            for row in connection.execute(
++                "SELECT name FROM sqlite_master WHERE type='table'"
++            ).fetchall()
++        }
++        required = {"categories", "rules", "statements", "transactions"}
++        if not required.issubset(tables):
++            raise ValueError("Backup is not a valid Bursar Cashbook database.")
++    finally:
++        connection.close()
++
++
++def restore_sqlite_backup(engine: Engine, filename: str) -> Path:
++    target_path = sqlite_file_from_engine(engine)
++    if target_path is None:
++        raise ValueError("Backup restore is available only for the local SQLite prototype.")
++
++    backup_path = _resolve_backup(filename)
++    _validate_sqlite_backup(backup_path)
++
++    target_path.parent.mkdir(parents=True, exist_ok=True)
++    engine.dispose()
++
++    source = sqlite3.connect(str(backup_path))
++    target = sqlite3.connect(str(target_path))
++    try:
++        source.backup(target)
++    finally:
++        target.close()
++        source.close()
++
++    engine.dispose()
++    return backup_path
+diff --git a/app/config.py b/app/config.py
+new file mode 100644
+index 0000000..579986c
+--- /dev/null
++++ b/app/config.py
+@@ -0,0 +1,38 @@
++import os
++from pathlib import Path
++
++PROJECT_ROOT = Path(__file__).resolve().parents[1]
++CONFIG_DIR = Path(os.getenv("CASHBOOK_CONFIG_DIR", PROJECT_ROOT / "config"))
++DEFAULT_WCED_TEMPLATE = CONFIG_DIR / "wced-template.xls"
++
++
++def get_wced_template_path() -> Path | None:
++    configured = os.getenv("WCED_TEMPLATE_PATH")
++    if configured:
++        return Path(configured).expanduser().resolve()
++
++    return DEFAULT_WCED_TEMPLATE if DEFAULT_WCED_TEMPLATE.is_file() else None
++
++
++def is_wced_template_ready() -> bool:
++    path = get_wced_template_path()
++    return path is not None and path.is_file()
++
++
++def get_wced_template_source() -> str:
++    if os.getenv("WCED_TEMPLATE_PATH"):
++        return "environment"
++    if DEFAULT_WCED_TEMPLATE.is_file():
++        return "local_config"
++    return "missing"
++
++
++def ensure_writable_directory(path: Path) -> bool:
++    try:
++        path.mkdir(parents=True, exist_ok=True)
++        probe = path / ".cashbook-write-test"
++        probe.write_text("ok", encoding="utf-8")
++        probe.unlink(missing_ok=True)
++        return True
++    except OSError:
++        return False
+diff --git a/app/main.py b/app/main.py
+index 19bc370..b8edcfd 100644
+--- a/app/main.py
++++ b/app/main.py
+@@ -1,7 +1,6 @@
+ from datetime import date, datetime
+ from hashlib import sha256
+ from io import BytesIO
+-import os
+ from pathlib import Path
+ 
+ from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+@@ -12,8 +11,21 @@ from pydantic import BaseModel
+ from sqlalchemy.orm import Session
+ 
+ from .audit import audit_event_to_dict, record_audit_event
+-from .backups import create_sqlite_backup
++from .backups import (
++    BACKUP_DIR,
++    create_sqlite_backup,
++    list_sqlite_backups,
++    restore_sqlite_backup,
++)
+ from .bank_parser import StatementParseError, parse_statement
++from .config import (
++    CONFIG_DIR,
++    DEFAULT_WCED_TEMPLATE,
++    ensure_writable_directory,
++    get_wced_template_path,
++    get_wced_template_source,
++    is_wced_template_ready,
++)
+ from .categorize import (
+     categorize,
+     learn_from_correction,
+@@ -24,7 +36,7 @@ from .db import SessionLocal, engine, init_db
+ from .diagnostics import build_diagnostics_zip
+ from .errors import new_error_id
+ from .fingerprints import standard_bank_transaction_fingerprint
+-from .logging_config import logger
++from .logging_config import LOG_DIR, logger
+ from .models import AuditEvent, Category, Statement, Transaction
+ from .reconciliation import StatementReconciliationError, reconcile_statement
+ from .version import APP_VERSION
+@@ -36,8 +48,10 @@ from .wced_export import (
+ 
+ app = FastAPI(title="Bursar Cashbook Automation", version=APP_VERSION)
+ REVIEW_PAGE = Path(__file__).parent / "static" / "review.html"
++HELP_PAGE = Path(__file__).parent / "static" / "help.html"
+ FINAL_STATUSES = ("approved", "corrected")
+ MAX_UPLOAD_BYTES = 15 * 1024 * 1024
++MAX_TEMPLATE_BYTES = 10 * 1024 * 1024
+ 
+ 
+ class ReviewDecision(BaseModel):
+@@ -50,6 +64,10 @@ class CategoryCreate(BaseModel):
+     type: str = "expense"
+ 
+ 
++class RestoreBackupRequest(BaseModel):
++    confirm: bool = False
++
++
+ @app.on_event("startup")
+ def startup() -> None:
+     backup_path = create_sqlite_backup(engine, "startup", once_per_day=True)
+@@ -125,6 +143,11 @@ def review_page():
+     return FileResponse(REVIEW_PAGE)
+ 
+ 
++@app.get("/help", include_in_schema=False)
++def help_page():
++    return FileResponse(HELP_PAGE)
++
++
+ def get_db():
+     db = SessionLocal()
+     try:
+@@ -223,6 +246,278 @@ def _statement_history_item(db: Session, statement: Statement) -> dict:
+     }
+ 
+ 
++
++def _setup_status(db: Session) -> dict:
++    category_count = db.query(Category).count()
++    database_ok = True
++    backup_writable = ensure_writable_directory(BACKUP_DIR)
++    log_writable = ensure_writable_directory(LOG_DIR)
++    config_writable = ensure_writable_directory(CONFIG_DIR)
++    template_ready = is_wced_template_ready()
++
++    checks = [
++        {
++            "id": "database",
++            "label": "Local cashbook database",
++            "ok": database_ok,
++            "message": "Database is ready." if database_ok else "Database is unavailable.",
++        },
++        {
++            "id": "categories",
++            "label": "Cashbook categories",
++            "ok": category_count > 0,
++            "message": (
++                f"{category_count} categories loaded."
++                if category_count > 0
++                else "No categories are loaded. Contact support before importing real statements."
++            ),
++        },
++        {
++            "id": "wced_template",
++            "label": "WCED cashbook template",
++            "ok": template_ready,
++            "message": (
++                f"Template ready ({get_wced_template_source()})."
++                if template_ready
++                else "Upload the blank WCED .xls template before generating WCED exports."
++            ),
++        },
++        {
++            "id": "backups",
++            "label": "Backup storage",
++            "ok": backup_writable,
++            "message": "Backup folder is writable." if backup_writable else "Backup folder is not writable.",
++        },
++        {
++            "id": "logs",
++            "label": "Diagnostic logs",
++            "ok": log_writable,
++            "message": "Log folder is writable." if log_writable else "Log folder is not writable.",
++        },
++    ]
++
++    return {
++        "version": APP_VERSION,
++        "bank": "Standard Bank",
++        "category_count": category_count,
++        "template_configured": template_ready,
++        "template_source": get_wced_template_source(),
++        "ready_for_import": database_ok and category_count > 0 and backup_writable and log_writable,
++        "ready_for_wced_export": (
++            database_ok
++            and category_count > 0
++            and template_ready
++            and backup_writable
++            and log_writable
++            and config_writable
++        ),
++        "checks": checks,
++    }
++
++
++@app.get("/setup/status")
++def setup_status(db: Session = Depends(get_db)):
++    return _setup_status(db)
++
++
++def _validate_wced_template(content: bytes) -> None:
++    import xlrd
++
++    try:
++        workbook = xlrd.open_workbook(file_contents=content, on_demand=True)
++    except Exception as exc:
++        raise HTTPException(
++            status_code=422,
++            detail="That file is not a readable legacy .xls workbook.",
++        ) from exc
++
++    required = {
++        f"{month} {suffix}"
++        for month in ("Jan", "Feb", "Mar", "April", "May", "June", "July", "Aug", "Sept", "Oct", "Nov", "Dec")
++        for suffix in ("PC", "RC")
++    }
++    missing = sorted(required.difference(workbook.sheet_names()))
++    workbook.release_resources()
++    if missing:
++        raise HTTPException(
++            status_code=422,
++            detail=(
++                "This does not look like the expected WCED cashbook template. "
++                f"Missing sheet(s): {', '.join(missing[:6])}"
++                + ("…" if len(missing) > 6 else "")
++            ),
++        )
++
++
++@app.post("/setup/wced-template")
++async def upload_wced_template(
++    file: UploadFile = File(...),
++    replace: bool = Form(False),
++    db: Session = Depends(get_db),
++):
++    filename = file.filename or "template.xls"
++    if Path(filename).suffix.lower() != ".xls":
++        raise HTTPException(status_code=422, detail="The WCED template must be a legacy .xls file.")
++
++    content = await file.read(MAX_TEMPLATE_BYTES + 1)
++    if not content:
++        raise HTTPException(status_code=400, detail="The WCED template file is empty.")
++    if len(content) > MAX_TEMPLATE_BYTES:
++        raise HTTPException(status_code=413, detail="WCED template is too large. Maximum size is 10 MB.")
++
++    _validate_wced_template(content)
++    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
++
++    if DEFAULT_WCED_TEMPLATE.exists() and not replace:
++        raise HTTPException(
++            status_code=409,
++            detail="A local WCED template is already configured. Choose replace to overwrite it.",
++        )
++
++    temporary = DEFAULT_WCED_TEMPLATE.with_suffix(".xls.tmp")
++    temporary.write_bytes(content)
++    temporary.replace(DEFAULT_WCED_TEMPLATE)
++
++    record_audit_event(
++        db,
++        "setup.wced_template_configured",
++        entity_type="application",
++        details={"replaced": replace, "size_bytes": len(content)},
++    )
++    db.commit()
++    logger.info("wced_template_configured", extra={"replaced": replace, "size_bytes": len(content)})
++    return _setup_status(db)
++
++
++@app.get("/backups")
++def backup_history():
++    return list_sqlite_backups()
++
++
++@app.post("/backups", status_code=201)
++def create_manual_backup(db: Session = Depends(get_db)):
++    path = create_sqlite_backup(engine, "manual")
++    if path is None:
++        raise HTTPException(status_code=409, detail="A local SQLite database is not available to back up.")
++
++    record_audit_event(
++        db,
++        "backup.created",
++        entity_type="application",
++        details={"filename": path.name, "reason": "manual"},
++    )
++    db.commit()
++    logger.info("manual_backup_created", extra={"backup_filename": path.name})
++    return {"filename": path.name, "message": "Backup created successfully."}
++
++
++@app.post("/backups/{filename}/restore")
++def restore_backup(filename: str, request: RestoreBackupRequest):
++    if not request.confirm:
++        raise HTTPException(status_code=422, detail="Restore confirmation is required.")
++
++    safety_backup = create_sqlite_backup(engine, "before-restore")
++    if safety_backup is None:
++        raise HTTPException(status_code=409, detail="Could not create the required safety backup before restore.")
++
++    try:
++        restored = restore_sqlite_backup(engine, filename)
++    except ValueError as exc:
++        raise HTTPException(status_code=422, detail=str(exc)) from exc
++
++    init_db()
++    db = SessionLocal()
++    try:
++        record_audit_event(
++            db,
++            "backup.restored",
++            entity_type="application",
++            details={
++                "restored_filename": restored.name,
++                "safety_backup_filename": safety_backup.name,
++            },
++        )
++        db.commit()
++    finally:
++        db.close()
++
++    logger.warning(
++        "database_backup_restored",
++        extra={
++            "restored_filename": restored.name,
++            "safety_backup_filename": safety_backup.name,
++        },
++    )
++    return {
++        "restored": restored.name,
++        "safety_backup": safety_backup.name,
++        "message": "Backup restored. Reload the cashbook before continuing.",
++    }
++
++
++def _export_summary(db: Session, year: int) -> dict:
++    start, end = _year_bounds(year)
++    transactions = (
++        db.query(Transaction)
++        .filter(Transaction.txn_date >= start, Transaction.txn_date < end)
++        .order_by(Transaction.txn_date, Transaction.id)
++        .all()
++    )
++
++    statements = (
++        db.query(Statement)
++        .filter(Statement.period_end >= start, Statement.period_start < end)
++        .order_by(Statement.period_start, Statement.id)
++        .all()
++    )
++
++    pending = sum(1 for transaction in transactions if transaction.status == "pending")
++    reviewed = sum(1 for transaction in transactions if transaction.status in FINAL_STATUSES)
++    money_out = sum(
++        (transaction.amount for transaction in transactions if transaction.direction == "debit"),
++        start=0,
++    )
++    money_in = sum(
++        (transaction.amount for transaction in transactions if transaction.direction == "credit"),
++        start=0,
++    )
++    all_reconciled = bool(statements) and all(
++        statement.reconciliation_status == "passed"
++        and statement.reconciliation_difference == 0
++        for statement in statements
++    )
++    difference = sum((statement.reconciliation_difference for statement in statements), start=0)
++
++    return {
++        "year": year,
++        "transaction_count": len(transactions),
++        "reviewed": reviewed,
++        "pending": pending,
++        "money_out": f"{money_out:.2f}",
++        "money_in": f"{money_in:.2f}",
++        "statement_count": len(statements),
++        "all_statements_reconciled": all_reconciled,
++        "reconciliation_difference": f"{difference:.2f}",
++        "wced_template_configured": is_wced_template_ready(),
++        "ready_for_reviewed_export": bool(transactions) and pending == 0 and reviewed == len(transactions) and all_reconciled,
++        "ready_for_wced_export": (
++            bool(transactions)
++            and pending == 0
++            and reviewed == len(transactions)
++            and all_reconciled
++            and is_wced_template_ready()
++        ),
++    }
++
++
++@app.get("/exports/summary")
++def export_summary(
++    year: int = Query(..., ge=2000, le=2100),
++    db: Session = Depends(get_db),
++):
++    return _export_summary(db, year)
++
++
+ @app.get("/imports/history")
+ def import_history(
+     limit: int = Query(50, ge=1, le=200),
+@@ -772,13 +1067,13 @@ def download_wced_cashbook(
+     year: int = Query(..., ge=2000, le=2100),
+     db: Session = Depends(get_db),
+ ):
+-    template_path = os.getenv("WCED_TEMPLATE_PATH")
+-    if not template_path:
++    template_path = get_wced_template_path()
++    if template_path is None:
+         raise HTTPException(
+             status_code=503,
+             detail=(
+-                "WCED_TEMPLATE_PATH is not configured. Set it to the blank "
+-                "WCED .xls cashbook template."
++                "The WCED cashbook template is not configured. Open Setup and upload "
++                "the blank WCED .xls template before exporting."
+             ),
+         )
+ 
+diff --git a/app/static/help.html b/app/static/help.html
+new file mode 100644
+index 0000000..e5ddf09
+--- /dev/null
++++ b/app/static/help.html
+@@ -0,0 +1,26 @@
++<!doctype html>
++<html lang="en">
++<head>
++  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
++  <title>Bursar Cashbook Help</title>
++  <style>
++    :root { font-family: system-ui, sans-serif; color: #172033; background: #f8fafc; }
++    body { max-width: 850px; margin: 2rem auto; padding: 0 1rem 3rem; line-height: 1.55; }
++    section { background:white; border:1px solid #dbe3ed; border-radius:.5rem; padding:1rem 1.2rem; margin:1rem 0; }
++    .button { display:inline-block; background:#0f766e; color:white; padding:.6rem .9rem; border-radius:.3rem; text-decoration:none; }
++    .muted { color:#64748b; } code { background:#e2e8f0; padding:.1rem .25rem; border-radius:.2rem; }
++  </style>
++</head>
++<body>
++  <a class="button" href="/">← Back to cashbook</a>
++  <h1>Bursar Cashbook Help</h1>
++  <p class="muted">Short guide for the Standard Bank pilot.</p>
++  <section><h2>Starting the cashbook</h2><p>Double-click <strong>START CASHBOOK.bat</strong>. Keep the black Cashbook window open while you work. Your browser will open the local cashbook automatically.</p></section>
++  <section><h2>1. Import a statement</h2><p>Download the Standard Bank statement as CSV, XLS or XLSX. Choose it under <strong>Import statement</strong>. The cashbook will validate the transaction structure and running balances before anything is saved.</p><p>If reconciliation fails, do not continue with that statement. Download a support bundle and contact the developer.</p></section>
++  <section><h2>2. Review transactions</h2><p>Every new transaction remains pending until you select or approve its category. Debit transactions use expense categories; credits use income categories.</p></section>
++  <section><h2>3. Export</h2><p>Select the financial year and choose the export you need. A confirmation screen shows transaction totals, money in/out, pending reviews and reconciliation status. The export button stays disabled until the year is ready.</p></section>
++  <section><h2>If something goes wrong</h2><p>Look for an error ID such as <code>ERR-20260831-12AB34CD</code>. Return to the cashbook and click <strong>Download support bundle</strong>. Send the ZIP and the error ID to the developer. The support bundle excludes full transaction descriptions and bank references.</p></section>
++  <section><h2>Backups</h2><p>The app automatically creates backups. You can also create one manually. Restore only when instructed or when you intentionally need to return to an earlier state. A new safety backup is created before every restore.</p></section>
++  <section><h2>Pilot rule</h2><p>During the pilot, compare generated WCED outputs with the normal manual process before treating the generated workbook as final.</p></section>
++</body>
++</html>
+diff --git a/app/static/review.html b/app/static/review.html
+index cd783e4..9853384 100644
+--- a/app/static/review.html
++++ b/app/static/review.html
+@@ -3,65 +3,59 @@
+ <head>
+   <meta charset="utf-8">
+   <meta name="viewport" content="width=device-width,initial-scale=1">
+-  <title>Bursar Cashbook Review</title>
++  <title>Bursar Cashbook</title>
+   <style>
+     :root { font-family: system-ui, sans-serif; color: #172033; background: #f8fafc; }
+     body { max-width: 1180px; margin: 2rem auto; padding: 0 1rem 3rem; }
+-    h1 { margin-bottom: .2rem; }
+-    h2 { margin-top: 2rem; }
+-    h3 { margin-bottom: .4rem; }
+-    .muted { color: #64748b; }
++    h1 { margin: 0; } h2 { margin-top: 2rem; } h3 { margin-bottom: .4rem; }
++    .muted { color: #64748b; } .good { color: #166534; font-weight: 700; } .bad { color: #991b1b; font-weight: 700; }
+     .panel { background: white; border: 1px solid #dbe3ed; border-radius: .5rem; padding: 1rem; margin-top: 1rem; }
+-    .header-row { display: flex; gap: .75rem; align-items: baseline; flex-wrap: wrap; }
++    .header-row { display: flex; gap: .75rem; align-items: center; justify-content: space-between; flex-wrap: wrap; }
++    .header-title { display: flex; gap: .75rem; align-items: baseline; flex-wrap: wrap; }
+     .version { background: #e2e8f0; border-radius: 999px; padding: .2rem .55rem; font-size: .82rem; }
+     form, .actions { display: flex; gap: .75rem; flex-wrap: wrap; align-items: end; }
+     label { display: grid; gap: .3rem; }
+     button, .button { background: #0f766e; color: white; border: 0; border-radius: .3rem; padding: .65rem .9rem; cursor: pointer; text-decoration: none; font: inherit; }
+-    button.secondary, .button.secondary { background: #475569; }
++    button.secondary, .button.secondary { background: #475569; } button.danger { background: #991b1b; }
+     button:disabled { opacity: .55; cursor: not-allowed; }
+     input, select { min-height: 2.25rem; padding: 0 .45rem; border: 1px solid #cbd5e1; border-radius: .3rem; background: white; }
+     select { min-width: 220px; }
+     table { width: 100%; border-collapse: collapse; margin-top: 1rem; background: white; }
+     th, td { border-bottom: 1px solid #dbe3ed; text-align: left; padding: .65rem .45rem; vertical-align: top; }
+     th { background: #f1f5f9; }
+-    #message { min-height: 1.5rem; font-weight: 600; }
+-    #reconciliation { white-space: pre-line; }
+-    .money-out { color: #991b1b; }
+-    .money-in { color: #166534; }
+-    .status-pass { color: #166534; font-weight: 700; }
++    #message { min-height: 1.5rem; font-weight: 600; } #reconciliation { white-space: pre-line; }
++    .money-out { color: #991b1b; } .money-in { color: #166534; } .status-pass { color: #166534; font-weight: 700; }
+     .support-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+     .scroll { max-height: 320px; overflow: auto; border: 1px solid #e2e8f0; border-radius: .4rem; }
+-    .scroll table { margin: 0; }
+-    .event-details { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .82rem; white-space: pre-wrap; }
+-    @media (max-width: 900px) {
+-      .support-grid { grid-template-columns: 1fr; }
+-    }
+-    @media (max-width: 760px) {
+-      table { display: block; overflow-x: auto; }
+-      .button, button { width: 100%; text-align: center; }
+-    }
++    .scroll table { margin: 0; } .event-details { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .82rem; white-space: pre-wrap; }
++    dialog { width: min(680px, calc(100% - 2rem)); border: 0; border-radius: .7rem; padding: 0; box-shadow: 0 24px 60px rgba(15, 23, 42, .28); }
++    dialog::backdrop { background: rgba(15, 23, 42, .55); }
++    .dialog-body { padding: 1.25rem; } .dialog-actions { display: flex; justify-content: flex-end; gap: .6rem; padding: 1rem 1.25rem; background: #f8fafc; border-top: 1px solid #e2e8f0; }
++    .check-list { display: grid; gap: .6rem; margin: 1rem 0; } .check { padding: .7rem; border: 1px solid #e2e8f0; border-radius: .4rem; }
++    .summary-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .6rem; margin: 1rem 0; }
++    .summary-item { background: #f8fafc; border: 1px solid #e2e8f0; padding: .75rem; border-radius: .4rem; }
++    @media (max-width: 900px) { .support-grid { grid-template-columns: 1fr; } }
++    @media (max-width: 760px) { table { display: block; overflow-x: auto; } .button, button { width: 100%; text-align: center; } .summary-grid { grid-template-columns: 1fr; } }
+   </style>
+ </head>
+ <body>
+   <div class="header-row">
+-    <h1>Bursar Cashbook Review</h1>
+-    <span id="app-version" class="version">Loading version…</span>
++    <div class="header-title">
++      <h1>Bursar Cashbook</h1>
++      <span id="app-version" class="version">Loading version…</span>
++    </div>
++    <div class="actions">
++      <button class="secondary" type="button" id="open-setup">Setup</button>
++      <a class="button secondary" href="/help">Help</a>
++    </div>
+   </div>
+-  <p class="muted">Standard Bank prototype. Every imported transaction requires bursar review before export.</p>
++  <p class="muted">Standard Bank pilot. Every imported transaction requires bursar review before export.</p>
+ 
+   <section class="panel">
+     <h2>1. Import statement</h2>
+     <form id="upload-form">
+-      <label>
+-        Bank
+-        <select name="bank">
+-          <option selected>Standard Bank</option>
+-        </select>
+-      </label>
+-      <label>
+-        Statement
+-        <input name="file" type="file" accept=".csv,.xls,.xlsx" required>
+-      </label>
++      <label>Bank<select name="bank"><option selected>Standard Bank</option></select></label>
++      <label>Statement<input name="file" type="file" accept=".csv,.xls,.xlsx" required></label>
+       <button type="submit">Upload statement</button>
+     </form>
+     <p id="reconciliation" class="muted"></p>
+@@ -70,277 +64,206 @@
+   <section class="panel">
+     <h2>2. Categories</h2>
+     <form id="category-form">
+-      <label>
+-        New category
+-        <input name="name" placeholder="e.g. LTSM: Stationery" required>
+-      </label>
+-      <label>
+-        Type
+-        <select name="type">
+-          <option value="expense">Expense</option>
+-          <option value="income">Income</option>
+-        </select>
+-      </label>
++      <label>New category<input name="name" placeholder="e.g. LTSM: Stationery" required></label>
++      <label>Type<select name="type"><option value="expense">Expense</option><option value="income">Income</option></select></label>
+       <button type="submit">Add category</button>
+     </form>
+   </section>
+ 
+   <section class="panel">
+     <h2>3. Export</h2>
+-    <form id="export-form" onsubmit="return false">
+-      <label>
+-        Financial year
+-        <input id="export-year" type="number" min="2000" max="2100" required>
+-      </label>
+-      <a id="reviewed-export" class="button" href="#">Download reviewed cashbook</a>
+-      <a id="wced-export" class="button" href="#">Download WCED cashbook</a>
+-    </form>
+-    <p class="muted">Exports are blocked while any transaction in that year is still pending review.</p>
++    <div class="actions">
++      <label>Financial year<input id="export-year" type="number" min="2000" max="2100" required></label>
++      <button type="button" id="reviewed-export">Generate reviewed cashbook</button>
++      <button type="button" id="wced-export">Generate WCED cashbook</button>
++    </div>
++    <p class="muted">A confirmation summary is shown before every export. Exports remain blocked while transactions are pending.</p>
+   </section>
+ 
+   <p id="message"></p>
+ 
+   <h2>Pending review</h2>
+   <table>
+-    <thead>
+-      <tr>
+-        <th>Date</th>
+-        <th>Description</th>
+-        <th>Reference</th>
+-        <th>Amount</th>
+-        <th>Balance</th>
+-        <th>Suggestion</th>
+-        <th>Approve / correct</th>
+-      </tr>
+-    </thead>
++    <thead><tr><th>Date</th><th>Description</th><th>Reference</th><th>Amount</th><th>Balance</th><th>Suggestion</th><th>Approve / correct</th></tr></thead>
+     <tbody id="rows"></tbody>
+   </table>
+ 
+   <section class="panel">
+     <h2>Support & history</h2>
+-    <p class="muted">If something breaks, download the diagnostic report and send the ZIP to the developer. It excludes full transaction descriptions and bank references.</p>
++    <p class="muted">If something breaks, download the support bundle and send the ZIP to the developer. It excludes full transaction descriptions and bank references.</p>
+     <div class="actions">
+-      <a class="button" href="/diagnostics/export">Download diagnostic report</a>
++      <a class="button" href="/diagnostics/export">Download support bundle</a>
+       <button class="secondary" type="button" id="refresh-history">Refresh history</button>
+     </div>
+-
+     <div class="support-grid">
+-      <div>
+-        <h3>Import history</h3>
+-        <div class="scroll">
+-          <table>
+-            <thead>
+-              <tr><th>When</th><th>Period</th><th>Imported</th><th>Review</th><th>Recon</th></tr>
+-            </thead>
+-            <tbody id="import-history"></tbody>
+-          </table>
+-        </div>
+-      </div>
+-
+-      <div>
+-        <h3>Audit history</h3>
+-        <div class="scroll">
+-          <table>
+-            <thead>
+-              <tr><th>When</th><th>Event</th><th>Details</th></tr>
+-            </thead>
+-            <tbody id="audit-history"></tbody>
+-          </table>
+-        </div>
+-      </div>
++      <div><h3>Import history</h3><div class="scroll"><table><thead><tr><th>When</th><th>Period</th><th>Imported</th><th>Review</th><th>Recon</th></tr></thead><tbody id="import-history"></tbody></table></div></div>
++      <div><h3>Audit history</h3><div class="scroll"><table><thead><tr><th>When</th><th>Event</th><th>Details</th></tr></thead><tbody id="audit-history"></tbody></table></div></div>
+     </div>
+   </section>
+ 
++  <section class="panel">
++    <h2>Backups</h2>
++    <p class="muted">A safety backup is created automatically before imports and restores. Restore only when you intentionally need to return to an earlier database state.</p>
++    <div class="actions"><button type="button" id="create-backup">Create backup now</button><button class="secondary" type="button" id="refresh-backups">Refresh backups</button></div>
++    <div class="scroll"><table><thead><tr><th>Created</th><th>Size</th><th>Backup</th><th>Action</th></tr></thead><tbody id="backup-history"></tbody></table></div>
++  </section>
++
++  <dialog id="setup-dialog">
++    <div class="dialog-body">
++      <h2>Cashbook setup</h2>
++      <p class="muted">These checks make sure this installation is ready for the pilot.</p>
++      <div id="setup-checks" class="check-list"></div>
++      <form id="template-form">
++        <label>Blank WCED .xls template<input name="file" type="file" accept=".xls" required></label>
++        <label><span>Replace existing template</span><input name="replace" type="checkbox"></label>
++        <button type="submit">Save WCED template</button>
++      </form>
++      <p id="setup-message" class="muted"></p>
++    </div>
++    <div class="dialog-actions"><button type="button" class="secondary" id="close-setup">Close</button></div>
++  </dialog>
++
++  <dialog id="export-dialog">
++    <div class="dialog-body">
++      <h2 id="export-dialog-title">Confirm export</h2>
++      <div id="export-summary"></div>
++    </div>
++    <div class="dialog-actions"><button type="button" class="secondary" id="cancel-export">Cancel</button><button type="button" id="confirm-export">Generate cashbook</button></div>
++  </dialog>
++
+   <script>
+     let categories = [];
++    let pendingExport = null;
+     const message = document.querySelector('#message');
+     const reconciliation = document.querySelector('#reconciliation');
+     const yearInput = document.querySelector('#export-year');
+-    const reviewedExport = document.querySelector('#reviewed-export');
+-    const wcedExport = document.querySelector('#wced-export');
++    const setupDialog = document.querySelector('#setup-dialog');
++    const exportDialog = document.querySelector('#export-dialog');
+ 
+-    const escapeHtml = value => String(value ?? '').replace(/[&<>'"]/g, char => ({
+-      '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
+-    }[char]));
++    const escapeHtml = value => String(value ?? '').replace(/[&<>'"]/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
++    const formatDateTime = value => { if (!value) return ''; const parsed = new Date(value); return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString(); };
++    const apiError = (data, fallback='Request failed.') => data?.error_id ? `${data?.detail || fallback} Error ID: ${data.error_id}` : (data?.detail || fallback);
++    const formatBytes = bytes => bytes < 1024 * 1024 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+ 
+-    function formatDateTime(value) {
+-      if (!value) return '';
+-      const parsed = new Date(value);
+-      return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString();
+-    }
+-
+-    function apiError(data, fallback = 'Request failed.') {
+-      const detail = data?.detail || fallback;
+-      return data?.error_id ? `${detail} Error ID: ${data.error_id}` : detail;
+-    }
+-
+-    function updateExportLinks() {
+-      const year = Number(yearInput.value);
+-      reviewedExport.href = `/exports/reviewed-cashbook.xlsx?year=${year}`;
+-      wcedExport.href = `/exports/wced-cashbook.xls?year=${year}`;
++    async function readJson(response) {
++      try { return await response.json(); } catch { return {}; }
+     }
+ 
+     async function loadHealth() {
+       const response = await fetch('/health');
+       const data = await response.json();
+-      document.querySelector('#app-version').textContent = `Prototype v${data.version}`;
++      document.querySelector('#app-version').textContent = `Pilot v${data.version}`;
+     }
+ 
+-    async function load() {
+-      const [categoryResponse, transactionResponse] = await Promise.all([
+-        fetch('/categories'),
+-        fetch('/transactions/pending')
+-      ]);
++    async function loadSetup({openWhenIncomplete=false} = {}) {
++      const response = await fetch('/setup/status');
++      const data = await response.json();
++      document.querySelector('#setup-checks').innerHTML = data.checks.map(check => `<div class="check"><div class="${check.ok ? 'good' : 'bad'}">${check.ok ? '✓' : '✗'} ${escapeHtml(check.label)}</div><div class="muted">${escapeHtml(check.message)}</div></div>`).join('');
++      if (openWhenIncomplete && !data.ready_for_wced_export) setupDialog.showModal();
++      return data;
++    }
+ 
++    async function load() {
++      const [categoryResponse, transactionResponse] = await Promise.all([fetch('/categories'), fetch('/transactions/pending')]);
+       categories = await categoryResponse.json();
+       const transactions = await transactionResponse.json();
+-
+       document.querySelector('#rows').innerHTML = transactions.map(transaction => {
+         const requiredType = transaction.direction === 'debit' ? 'expense' : 'income';
+         const validCategories = categories.filter(category => category.type === requiredType);
+-        const blankSelected = transaction.suggested_category_id ? '' : 'selected';
+-        const blank = `<option value="" ${blankSelected} disabled>Select category</option>`;
+-        const options = validCategories.map(category => (
+-          `<option value="${category.id}" ${category.id === transaction.suggested_category_id ? 'selected' : ''}>${escapeHtml(category.name)}</option>`
+-        )).join('');
+-
+-        const suggestion = transaction.suggested_category
+-          ? `${escapeHtml(transaction.suggested_category)} (${Math.round(transaction.confidence * 100)}%)`
+-          : 'No suggestion';
+-
++        const blank = `<option value="" ${transaction.suggested_category_id ? '' : 'selected'} disabled>Select category</option>`;
++        const options = validCategories.map(category => `<option value="${category.id}" ${category.id === transaction.suggested_category_id ? 'selected' : ''}>${escapeHtml(category.name)}</option>`).join('');
++        const suggestion = transaction.suggested_category ? `${escapeHtml(transaction.suggested_category)} (${Math.round(transaction.confidence * 100)}%)` : 'No suggestion';
+         const sign = transaction.direction === 'debit' ? '-' : '+';
+-        const amountClass = transaction.direction === 'debit' ? 'money-out' : 'money-in';
+-
+-        return `<tr>
+-          <td>${escapeHtml(transaction.date)}</td>
+-          <td>${escapeHtml(transaction.description)}</td>
+-          <td>${escapeHtml(transaction.reference || '')}</td>
+-          <td class="${amountClass}">${sign} R${escapeHtml(transaction.amount)}</td>
+-          <td>R${escapeHtml(transaction.balance_after)}</td>
+-          <td>${suggestion}</td>
+-          <td>
+-            <select id="category-${transaction.id}">${blank}${options}</select>
+-            <button type="button" onclick="review(${transaction.id})">Save</button>
+-          </td>
+-        </tr>`;
++        return `<tr><td>${escapeHtml(transaction.date)}</td><td>${escapeHtml(transaction.description)}</td><td>${escapeHtml(transaction.reference || '')}</td><td class="${transaction.direction === 'debit' ? 'money-out' : 'money-in'}">${sign} R${escapeHtml(transaction.amount)}</td><td>R${escapeHtml(transaction.balance_after)}</td><td>${suggestion}</td><td><select id="category-${transaction.id}">${blank}${options}</select> <button type="button" onclick="review(${transaction.id})">Save</button></td></tr>`;
+       }).join('') || '<tr><td colspan="7">Nothing waiting for review.</td></tr>';
+     }
+ 
+     async function loadHistory() {
+-      const [importsResponse, auditResponse] = await Promise.all([
+-        fetch('/imports/history?limit=50'),
+-        fetch('/audit/history?limit=100')
+-      ]);
+-
+-      const imports = await importsResponse.json();
+-      const events = await auditResponse.json();
+-
+-      document.querySelector('#import-history').innerHTML = imports.map(item => (
+-        `<tr>
+-          <td>${escapeHtml(formatDateTime(item.uploaded_at))}</td>
+-          <td>${escapeHtml(item.period_start)} → ${escapeHtml(item.period_end)}</td>
+-          <td>${item.transactions_imported}/${item.source_transactions}<br><span class="muted">${item.duplicates_skipped} duplicate(s)</span></td>
+-          <td>${item.pending} pending<br>${item.approved} approved<br>${item.corrected} corrected</td>
+-          <td class="status-pass">${escapeHtml(item.reconciliation_status.toUpperCase())}<br><span class="muted">Δ R${escapeHtml(item.reconciliation_difference)}</span></td>
+-        </tr>`
+-      )).join('') || '<tr><td colspan="5">No imports yet.</td></tr>';
++      const [importsResponse, auditResponse] = await Promise.all([fetch('/imports/history?limit=50'), fetch('/audit/history?limit=100')]);
++      const imports = await importsResponse.json(); const events = await auditResponse.json();
++      document.querySelector('#import-history').innerHTML = imports.map(item => `<tr><td>${escapeHtml(formatDateTime(item.uploaded_at))}</td><td>${escapeHtml(item.period_start)} → ${escapeHtml(item.period_end)}</td><td>${item.transactions_imported}/${item.source_transactions}<br><span class="muted">${item.duplicates_skipped} duplicate(s)</span></td><td>${item.pending} pending<br>${item.approved} approved<br>${item.corrected} corrected</td><td class="status-pass">${escapeHtml(item.reconciliation_status.toUpperCase())}<br><span class="muted">Δ R${escapeHtml(item.reconciliation_difference)}</span></td></tr>`).join('') || '<tr><td colspan="5">No imports yet.</td></tr>';
++      document.querySelector('#audit-history').innerHTML = events.map(event => `<tr><td>${escapeHtml(formatDateTime(event.created_at))}</td><td>${escapeHtml(event.event_type)}</td><td class="event-details">${escapeHtml(JSON.stringify(event.details))}</td></tr>`).join('') || '<tr><td colspan="3">No audit events yet.</td></tr>';
++    }
+ 
+-      document.querySelector('#audit-history').innerHTML = events.map(event => (
+-        `<tr>
+-          <td>${escapeHtml(formatDateTime(event.created_at))}</td>
+-          <td>${escapeHtml(event.event_type)}</td>
+-          <td class="event-details">${escapeHtml(JSON.stringify(event.details))}</td>
+-        </tr>`
+-      )).join('') || '<tr><td colspan="3">No audit events yet.</td></tr>';
++    async function loadBackups() {
++      const response = await fetch('/backups'); const backups = await response.json();
++      document.querySelector('#backup-history').innerHTML = backups.map(item => `<tr><td>${escapeHtml(formatDateTime(item.modified_at))}</td><td>${formatBytes(item.size_bytes)}</td><td>${escapeHtml(item.filename)}</td><td><button type="button" class="danger" onclick="restoreBackup('${escapeHtml(item.filename)}')">Restore</button></td></tr>`).join('') || '<tr><td colspan="4">No backups yet.</td></tr>';
+     }
+ 
+     async function review(id) {
+       const categoryId = Number(document.querySelector(`#category-${id}`).value);
+-      if (!categoryId) {
+-        message.textContent = 'Select a category before saving.';
+-        return;
+-      }
+-
+-      const response = await fetch(`/transactions/${id}/review`, {
+-        method: 'POST',
+-        headers: {'Content-Type': 'application/json'},
+-        body: JSON.stringify({category_id: categoryId, learn: true})
+-      });
+-      const data = await response.json();
+-
+-      if (!response.ok) {
+-        message.textContent = apiError(data);
+-        return;
+-      }
+-
++      if (!categoryId) { message.textContent = 'Select a category before saving.'; return; }
++      const response = await fetch(`/transactions/${id}/review`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({category_id:categoryId, learn:true})});
++      const data = await readJson(response);
++      if (!response.ok) { message.textContent = apiError(data); return; }
+       message.textContent = data.idempotent ? 'Already saved.' : `Saved as ${data.status}.`;
+       await Promise.all([load(), loadHistory()]);
+     }
+ 
+-    document.querySelector('#upload-form').addEventListener('submit', async event => {
+-      event.preventDefault();
+-      message.textContent = 'Importing...';
+-      reconciliation.textContent = '';
++    async function prepareExport(kind) {
++      const year = Number(yearInput.value);
++      const response = await fetch(`/exports/summary?year=${year}`); const data = await readJson(response);
++      if (!response.ok) { message.textContent = apiError(data); return; }
++      const ready = kind === 'wced' ? data.ready_for_wced_export : data.ready_for_reviewed_export;
++      document.querySelector('#export-dialog-title').textContent = kind === 'wced' ? `Generate ${year} WCED cashbook?` : `Generate ${year} reviewed cashbook?`;
++      document.querySelector('#export-summary').innerHTML = `<div class="summary-grid"><div class="summary-item"><strong>Transactions</strong><br>${data.transaction_count}</div><div class="summary-item"><strong>Reviewed</strong><br>${data.reviewed}</div><div class="summary-item"><strong>Pending</strong><br>${data.pending}</div><div class="summary-item"><strong>Statements</strong><br>${data.statement_count}</div><div class="summary-item"><strong>Money in</strong><br>R${escapeHtml(data.money_in)}</div><div class="summary-item"><strong>Money out</strong><br>R${escapeHtml(data.money_out)}</div><div class="summary-item"><strong>Reconciliation</strong><br><span class="${data.all_statements_reconciled ? 'good' : 'bad'}">${data.all_statements_reconciled ? 'PASSED' : 'NOT READY'}</span></div><div class="summary-item"><strong>Difference</strong><br>R${escapeHtml(data.reconciliation_difference)}</div></div>${kind === 'wced' && !data.wced_template_configured ? '<p class="bad">WCED template is not configured. Open Setup first.</p>' : ''}${ready ? '<p class="good">Ready to export.</p>' : '<p class="bad">Export is blocked until the items above are resolved.</p>'}`;
++      pendingExport = ready ? {kind, year} : null;
++      document.querySelector('#confirm-export').disabled = !ready;
++      exportDialog.showModal();
++    }
+ 
+-      const response = await fetch('/statements/upload', {
+-        method: 'POST',
+-        body: new FormData(event.target)
+-      });
+-      const data = await response.json();
++    async function downloadFile(url) {
++      const response = await fetch(url);
++      if (!response.ok) { const data = await readJson(response); message.textContent = apiError(data, 'Export failed.'); return; }
++      const blob = await response.blob();
++      const disposition = response.headers.get('Content-Disposition') || '';
++      const match = disposition.match(/filename="?([^";]+)"?/i);
++      const filename = match ? match[1] : 'cashbook-export';
++      const objectUrl = URL.createObjectURL(blob); const anchor = document.createElement('a'); anchor.href = objectUrl; anchor.download = filename; document.body.appendChild(anchor); anchor.click(); anchor.remove(); URL.revokeObjectURL(objectUrl);
++      message.textContent = `${filename} generated successfully.`;
++      await loadHistory();
++    }
+ 
+-      if (!response.ok) {
+-        message.textContent = apiError(data);
+-        return;
+-      }
++    async function restoreBackup(filename) {
++      if (!confirm(`Restore ${filename}?\n\nYour current database will first be backed up automatically. The selected backup will then replace the current data.`)) return;
++      const response = await fetch(`/backups/${encodeURIComponent(filename)}/restore`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({confirm:true})});
++      const data = await readJson(response);
++      if (!response.ok) { message.textContent = apiError(data, 'Restore failed.'); return; }
++      alert(`${data.message}\n\nSafety backup: ${data.safety_backup}`);
++      window.location.reload();
++    }
+ 
++    document.querySelector('#upload-form').addEventListener('submit', async event => {
++      event.preventDefault(); message.textContent = 'Importing and reconciling statement…'; reconciliation.textContent = '';
++      const response = await fetch('/statements/upload', {method:'POST', body:new FormData(event.target)}); const data = await readJson(response);
++      if (!response.ok) { message.textContent = apiError(data); return; }
+       message.textContent = `${data.transactions_imported} transaction(s) imported; ${data.duplicates_skipped} duplicate(s) skipped; ${data.pending_review} require review.`;
+-      reconciliation.textContent = [
+-        'Reconciliation: PASSED',
+-        `Opening balance: R${data.reconciliation.opening_balance}`,
+-        `Money in: R${data.reconciliation.total_credits}`,
+-        `Money out: R${data.reconciliation.total_debits}`,
+-        `Closing balance: R${data.reconciliation.closing_balance}`,
+-        `Difference: R${data.reconciliation.difference}`
+-      ].join('\n');
+-
+-      yearInput.value = Number(data.period.start.slice(0, 4));
+-      updateExportLinks();
+-      event.target.reset();
+-      await Promise.all([load(), loadHistory()]);
++      reconciliation.textContent = ['Reconciliation: PASSED', `Opening balance: R${data.reconciliation.opening_balance}`, `Money in: R${data.reconciliation.total_credits}`, `Money out: R${data.reconciliation.total_debits}`, `Closing balance: R${data.reconciliation.closing_balance}`, `Difference: R${data.reconciliation.difference}`].join('\n');
++      yearInput.value = Number(data.period.start.slice(0, 4)); event.target.reset(); await Promise.all([load(), loadHistory(), loadBackups()]);
+     });
+ 
+     document.querySelector('#category-form').addEventListener('submit', async event => {
+-      event.preventDefault();
+-      const form = new FormData(event.target);
+-      const response = await fetch('/categories', {
+-        method: 'POST',
+-        headers: {'Content-Type': 'application/json'},
+-        body: JSON.stringify({name: form.get('name'), type: form.get('type')})
+-      });
+-      const data = await response.json();
+-
+-      message.textContent = response.ok ? `${data.name} added.` : apiError(data);
+-      if (response.ok) {
+-        event.target.reset();
+-        await Promise.all([load(), loadHistory()]);
+-      }
++      event.preventDefault(); const form = new FormData(event.target); const response = await fetch('/categories', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name:form.get('name'), type:form.get('type')})}); const data = await readJson(response);
++      message.textContent = response.ok ? `${data.name} added.` : apiError(data); if (response.ok) { event.target.reset(); await Promise.all([load(), loadHistory()]); }
+     });
+ 
+-    document.querySelector('#refresh-history').addEventListener('click', () => {
+-      loadHistory().catch(error => {
+-        console.error(error);
+-        message.textContent = 'Could not refresh history.';
+-      });
++    document.querySelector('#template-form').addEventListener('submit', async event => {
++      event.preventDefault(); const form = new FormData(event.target); form.set('replace', form.get('replace') ? 'true' : 'false'); const response = await fetch('/setup/wced-template', {method:'POST', body:form}); const data = await readJson(response);
++      document.querySelector('#setup-message').textContent = response.ok ? 'WCED template saved successfully.' : apiError(data); if (response.ok) await loadSetup();
+     });
+ 
+-    yearInput.value = new Date().getFullYear();
+-    yearInput.addEventListener('input', updateExportLinks);
+-    updateExportLinks();
++    document.querySelector('#create-backup').addEventListener('click', async () => { const response = await fetch('/backups', {method:'POST'}); const data = await readJson(response); message.textContent = response.ok ? data.message : apiError(data); if (response.ok) await Promise.all([loadBackups(), loadHistory()]); });
++    document.querySelector('#refresh-backups').addEventListener('click', loadBackups);
++    document.querySelector('#refresh-history').addEventListener('click', loadHistory);
++    document.querySelector('#open-setup').addEventListener('click', async () => { await loadSetup(); setupDialog.showModal(); });
++    document.querySelector('#close-setup').addEventListener('click', () => setupDialog.close());
++    document.querySelector('#reviewed-export').addEventListener('click', () => prepareExport('reviewed'));
++    document.querySelector('#wced-export').addEventListener('click', () => prepareExport('wced'));
++    document.querySelector('#cancel-export').addEventListener('click', () => { pendingExport = null; exportDialog.close(); });
++    document.querySelector('#confirm-export').addEventListener('click', async () => { if (!pendingExport) return; const {kind, year} = pendingExport; pendingExport = null; exportDialog.close(); const url = kind === 'wced' ? `/exports/wced-cashbook.xls?year=${year}` : `/exports/reviewed-cashbook.xlsx?year=${year}`; await downloadFile(url); });
+ 
+-    Promise.all([loadHealth(), load(), loadHistory()]).catch(error => {
+-      console.error(error);
+-      message.textContent = 'Could not load the review screen.';
+-    });
++    yearInput.value = new Date().getFullYear();
++    Promise.all([loadHealth(), load(), loadHistory(), loadBackups(), loadSetup({openWhenIncomplete:true})]).catch(error => { console.error(error); message.textContent = 'Could not load the cashbook. Open Help and download a support bundle if the problem continues.'; });
+   </script>
+ </body>
+ </html>
+diff --git a/app/version.py b/app/version.py
+index 4a013b8..f1770de 100644
+--- a/app/version.py
++++ b/app/version.py
+@@ -1 +1 @@
+-APP_VERSION = "0.2.0"
++APP_VERSION = "0.3.0"
+diff --git a/config/.gitkeep b/config/.gitkeep
+new file mode 100644
+index 0000000..e69de29
+diff --git a/docs/BURSAR_USER_GUIDE.md b/docs/BURSAR_USER_GUIDE.md
+new file mode 100644
+index 0000000..4626a67
+--- /dev/null
++++ b/docs/BURSAR_USER_GUIDE.md
+@@ -0,0 +1,62 @@
++# Bursar Cashbook — Pilot User Guide
++
++## Start the application
++
++1. Double-click `START CASHBOOK.bat`.
++2. Keep the black Cashbook window open while using the application.
++3. The Cashbook opens in the browser automatically.
++
++If the application says setup is incomplete, run `SETUP CASHBOOK.bat` or contact support.
++
++## First-time setup
++
++Open **Setup** in the top-right corner.
++
++All checks should show a green tick. If the WCED template is missing, upload the blank WCED `.xls` cashbook template supplied for the pilot.
++
++Do not use a historical cashbook containing real captured entries as the blank export template.
++
++## Import a Standard Bank statement
++
++1. Download the statement from Standard Bank as CSV, XLS or XLSX.
++2. Under **Import statement**, choose the file.
++3. Click **Upload statement**.
++4. Wait for **Reconciliation: PASSED**.
++
++If reconciliation fails, stop and contact support. Do not manually force the statement through.
++
++## Review transactions
++
++Every imported transaction requires review.
++
++- Money out uses an **expense** category.
++- Money in uses an **income** category.
++- Review the suggested category and change it where necessary.
++- Click **Save** for every transaction.
++
++## Generate a cashbook
++
++1. Choose the financial year.
++2. Select **Generate reviewed cashbook** or **Generate WCED cashbook**.
++3. Check the confirmation summary.
++4. Confirm only when pending transactions are `0` and reconciliation has passed.
++
++During the pilot, compare the generated output with the normal manual cashbook process before treating it as final.
++
++## Backups
++
++The app automatically creates local backups before imports and restores. You can also click **Create backup now**.
++
++Only restore an older backup when you intentionally need to return to an earlier state. A safety backup of the current database is automatically created first.
++
++## If something goes wrong
++
++If an error ID appears, for example:
++
++`ERR-20260831-12AB34CD`
++
++1. Copy or photograph the error ID.
++2. Click **Download support bundle**.
++3. Send the ZIP and error ID to the developer.
++
++The default support bundle does not include full transaction descriptions or bank references.
+diff --git a/docs/DEVELOPER_SUPPORT.md b/docs/DEVELOPER_SUPPORT.md
+new file mode 100644
+index 0000000..5a4ab5d
+--- /dev/null
++++ b/docs/DEVELOPER_SUPPORT.md
+@@ -0,0 +1,55 @@
++# Developer Support Guide
++
++## Start locally
++
++```powershell
++.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
++```
++
++## Run tests
++
++```powershell
++python -m unittest discover -s tests -v
++```
++
++## Important locations
++
++- Database: `cashbook.db`
++- Logs: `logs/cashbook.log`
++- Backups: `backups/`
++- Local WCED template: `config/wced-template.xls`
++- App version: `app/version.py` and `version.txt`
++
++## Error IDs
++
++Unexpected exceptions are assigned IDs such as `ERR-YYYYMMDD-XXXXXXXX`. Search `logs/cashbook.log` for the ID. The corresponding audit event is `application.error`.
++
++## Support bundles
++
++The UI downloads `/diagnostics/export`. It contains runtime metadata, a log tail, import summaries and audit events. It intentionally excludes full transaction descriptions and bank references.
++
++## Backup restore
++
++The UI calls `POST /backups/{filename}/restore` with `{ "confirm": true }`.
++
++Before restoration, the application creates a `before-restore` backup. Restore is SQLite-only and validates the selected database with `PRAGMA integrity_check` plus required table checks.
++
++## Updating the pilot installation
++
++1. Ask the bursar to close the app.
++2. Create a manual backup.
++3. Apply the tested patch/update.
++4. Run the full test suite.
++5. Start the app and check `/setup/status`.
++6. Confirm the displayed version changed.
++
++Do not delete `cashbook.db` during Phase 3 updates unless intentionally rebuilding a test installation.
++
++## Version bump
++
++Update both:
++
++- `app/version.py`
++- `version.txt`
++
++Keep support bundles and UI version labels aligned with the installed build.
+diff --git a/docs/PILOT_CHECKLIST.md b/docs/PILOT_CHECKLIST.md
+new file mode 100644
+index 0000000..c3ce327
+--- /dev/null
++++ b/docs/PILOT_CHECKLIST.md
+@@ -0,0 +1,41 @@
++# Pilot Checklist
++
++## Before handover
++
++- [ ] Full automated test suite passes.
++- [ ] `SETUP CASHBOOK.bat` works on the bursar's Windows machine.
++- [ ] `START CASHBOOK.bat` opens the application.
++- [ ] Setup screen shows all green checks.
++- [ ] Correct blank WCED `.xls` template is configured.
++- [ ] Manual backup can be created.
++- [ ] Support bundle downloads successfully.
++
++## First controlled statement
++
++- [ ] Use one known Standard Bank statement.
++- [ ] Confirm imported transaction count against the bank statement.
++- [ ] Confirm money in total.
++- [ ] Confirm money out total.
++- [ ] Confirm running-balance reconciliation passes with R0.00 difference.
++- [ ] Bursar reviews every transaction.
++- [ ] Pending count reaches zero.
++- [ ] Generate reviewed XLSX.
++- [ ] Generate WCED XLS.
++- [ ] Compare both outputs with the bursar's normal manual process.
++- [ ] Record every mismatch or confusing interaction.
++
++## During pilot
++
++- [ ] Keep automatic backups enabled.
++- [ ] Capture error IDs when failures occur.
++- [ ] Ask for a support bundle when diagnosing errors.
++- [ ] Do not manually edit the SQLite database unless recovering under developer supervision.
++- [ ] Review logs and audit history after meaningful incidents.
++
++## Exit criteria for the one-bursar prototype
++
++- [ ] Several real accounting periods processed successfully.
++- [ ] No unexplained reconciliation differences.
++- [ ] No duplicate financial entries from overlapping statements.
++- [ ] WCED output repeatedly matches the accepted manual workflow.
++- [ ] Bursar can operate the application without developer assistance for normal usage.
+diff --git a/tests/test_handover.py b/tests/test_handover.py
+new file mode 100644
+index 0000000..300ec66
+--- /dev/null
++++ b/tests/test_handover.py
+@@ -0,0 +1,176 @@
++import tempfile
++import unittest
++from decimal import Decimal
++from pathlib import Path
++from unittest.mock import patch
++
++from fastapi.testclient import TestClient
++from sqlalchemy import create_engine
++from sqlalchemy.orm import sessionmaker
++from sqlalchemy.pool import StaticPool
++
++from app import backups, config
++from app.main import app, get_db
++from app.models import Base, Category, Statement, Transaction
++from app.version import APP_VERSION
++
++
++class HandoverApiTests(unittest.TestCase):
++    def setUp(self):
++        self.engine = create_engine(
++            "sqlite://",
++            connect_args={"check_same_thread": False},
++            poolclass=StaticPool,
++        )
++        Base.metadata.create_all(self.engine)
++        self.session_factory = sessionmaker(bind=self.engine, expire_on_commit=False)
++
++        def override_get_db():
++            db = self.session_factory()
++            try:
++                yield db
++            finally:
++                db.close()
++
++        app.dependency_overrides[get_db] = override_get_db
++        self.client = TestClient(app)
++
++    def tearDown(self):
++        app.dependency_overrides.clear()
++        self.engine.dispose()
++
++    def test_help_page_is_available(self):
++        response = self.client.get("/help")
++        self.assertEqual(response.status_code, 200)
++        self.assertIn("Bursar Cashbook Help", response.text)
++
++    def test_version_bumped_for_handover(self):
++        self.assertEqual(APP_VERSION, "0.3.0")
++
++    def test_setup_status_reports_missing_categories_and_template(self):
++        with tempfile.TemporaryDirectory() as directory:
++            root = Path(directory)
++            with patch.object(config, "CONFIG_DIR", root / "config"), patch.object(
++                config, "DEFAULT_WCED_TEMPLATE", root / "config" / "wced-template.xls"
++            ), patch("app.main.CONFIG_DIR", root / "config"), patch(
++                "app.main.DEFAULT_WCED_TEMPLATE", root / "config" / "wced-template.xls"
++            ):
++                response = self.client.get("/setup/status")
++
++        self.assertEqual(response.status_code, 200)
++        data = response.json()
++        self.assertFalse(data["ready_for_import"])
++        self.assertFalse(data["ready_for_wced_export"])
++        self.assertEqual(data["category_count"], 0)
++
++    def test_setup_status_becomes_import_ready_when_categories_exist(self):
++        db = self.session_factory()
++        db.add(Category(name="Stationery", type="expense"))
++        db.commit()
++        db.close()
++
++        with tempfile.TemporaryDirectory() as directory:
++            root = Path(directory)
++            with patch.object(config, "CONFIG_DIR", root / "config"), patch.object(
++                config, "DEFAULT_WCED_TEMPLATE", root / "config" / "wced-template.xls"
++            ), patch("app.main.CONFIG_DIR", root / "config"), patch(
++                "app.main.DEFAULT_WCED_TEMPLATE", root / "config" / "wced-template.xls"
++            ):
++                response = self.client.get("/setup/status")
++
++        data = response.json()
++        self.assertTrue(data["ready_for_import"])
++        self.assertFalse(data["ready_for_wced_export"])
++
++    def test_export_summary_blocks_pending_and_allows_reviewed(self):
++        db = self.session_factory()
++        category = Category(name="Stationery", type="expense")
++        db.add(category)
++        db.flush()
++        statement = Statement(
++            bank="Standard Bank",
++            source_filename="statement.csv",
++            source_hash="a" * 64,
++            period_start=__import__("datetime").date(2026, 8, 1),
++            period_end=__import__("datetime").date(2026, 8, 1),
++            financial_year=2026,
++            opening_balance=Decimal("1000.00"),
++            closing_balance=Decimal("900.00"),
++            total_debits=Decimal("100.00"),
++            total_credits=Decimal("0.00"),
++            reconciliation_difference=Decimal("0.00"),
++            reconciliation_status="passed",
++            source_transaction_count=1,
++            imported_transaction_count=1,
++            duplicate_transaction_count=0,
++        )
++        db.add(statement)
++        db.flush()
++        transaction = Transaction(
++            statement_id=statement.id,
++            fingerprint="b" * 64,
++            source_row=2,
++            txn_date=__import__("datetime").date(2026, 8, 1),
++            payee_raw="Vendor",
++            payee_normalized="VENDOR",
++            balance_after=Decimal("900.00"),
++            amount=Decimal("100.00"),
++            direction="debit",
++            status="pending",
++        )
++        db.add(transaction)
++        db.commit()
++
++        pending = self.client.get("/exports/summary?year=2026").json()
++        self.assertFalse(pending["ready_for_reviewed_export"])
++        self.assertEqual(pending["pending"], 1)
++
++        transaction.status = "corrected"
++        transaction.category_id = category.id
++        db.commit()
++        reviewed = self.client.get("/exports/summary?year=2026").json()
++        self.assertTrue(reviewed["ready_for_reviewed_export"])
++        self.assertEqual(reviewed["money_out"], "100.00")
++        db.close()
++
++
++class BackupRestoreTests(unittest.TestCase):
++    def test_restore_replaces_database_and_creates_valid_state(self):
++        with tempfile.TemporaryDirectory() as directory:
++            root = Path(directory)
++            database_path = root / "cashbook.db"
++            backup_dir = root / "backups"
++            engine = create_engine(f"sqlite:///{database_path}")
++
++            Base.metadata.create_all(engine)
++            Session = sessionmaker(bind=engine)
++            db = Session()
++            db.add(Category(name="Before", type="expense"))
++            db.commit()
++            db.close()
++
++            with patch.object(backups, "BACKUP_DIR", backup_dir), patch.object(
++                backups, "BACKUP_RETENTION", 10
++            ):
++                backup_path = backups.create_sqlite_backup(engine, "manual")
++                self.assertIsNotNone(backup_path)
++
++                db = Session()
++                db.add(Category(name="After", type="expense"))
++                db.commit()
++                db.close()
++
++                backups.restore_sqlite_backup(engine, backup_path.name)
++
++            RestoredSession = sessionmaker(bind=engine)
++            db = RestoredSession()
++            names = {category.name for category in db.query(Category).all()}
++            db.close()
++            engine.dispose()
++
++            self.assertIn("Before", names)
++            self.assertNotIn("After", names)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/version.txt b/version.txt
+new file mode 100644
+index 0000000..0d91a54
+--- /dev/null
++++ b/version.txt
+@@ -0,0 +1 @@
++0.3.0

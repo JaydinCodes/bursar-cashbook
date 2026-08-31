@@ -12,3 +12,4 @@ backups/
 exports/
 data/private/
 scripts/node_modules/
+*.db-journal

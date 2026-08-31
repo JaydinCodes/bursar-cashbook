@@ -7,6 +7,7 @@ from sqlalchemy import (
     Integer,
     Numeric,
     String,
+    Text,
     UniqueConstraint,
     func,
 )
@@ -120,3 +121,14 @@ class Transaction(Base):
     suggested_category = relationship("Category", foreign_keys=[suggested_category_id])
     category = relationship("Category", foreign_keys=[category_id])
     learned_category = relationship("Category", foreign_keys=[learned_category_id])
+
+
+class AuditEvent(Base):
+    __tablename__ = "audit_events"
+
+    id = Column(Integer, primary_key=True)
+    event_type = Column(String, nullable=False, index=True)
+    entity_type = Column(String, nullable=True, index=True)
+    entity_id = Column(Integer, nullable=True, index=True)
+    details_json = Column(Text, nullable=False, default="{}")
+    created_at = Column(DateTime, server_default=func.now(), nullable=False, index=True)
