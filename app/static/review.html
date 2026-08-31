@@ -3,65 +3,59 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Bursar Cashbook Review</title>
+  <title>Bursar Cashbook</title>
   <style>
     :root { font-family: system-ui, sans-serif; color: #172033; background: #f8fafc; }
     body { max-width: 1180px; margin: 2rem auto; padding: 0 1rem 3rem; }
-    h1 { margin-bottom: .2rem; }
-    h2 { margin-top: 2rem; }
-    h3 { margin-bottom: .4rem; }
-    .muted { color: #64748b; }
+    h1 { margin: 0; } h2 { margin-top: 2rem; } h3 { margin-bottom: .4rem; }
+    .muted { color: #64748b; } .good { color: #166534; font-weight: 700; } .bad { color: #991b1b; font-weight: 700; }
     .panel { background: white; border: 1px solid #dbe3ed; border-radius: .5rem; padding: 1rem; margin-top: 1rem; }
-    .header-row { display: flex; gap: .75rem; align-items: baseline; flex-wrap: wrap; }
+    .header-row { display: flex; gap: .75rem; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+    .header-title { display: flex; gap: .75rem; align-items: baseline; flex-wrap: wrap; }
     .version { background: #e2e8f0; border-radius: 999px; padding: .2rem .55rem; font-size: .82rem; }
     form, .actions { display: flex; gap: .75rem; flex-wrap: wrap; align-items: end; }
     label { display: grid; gap: .3rem; }
     button, .button { background: #0f766e; color: white; border: 0; border-radius: .3rem; padding: .65rem .9rem; cursor: pointer; text-decoration: none; font: inherit; }
-    button.secondary, .button.secondary { background: #475569; }
+    button.secondary, .button.secondary { background: #475569; } button.danger { background: #991b1b; }
     button:disabled { opacity: .55; cursor: not-allowed; }
     input, select { min-height: 2.25rem; padding: 0 .45rem; border: 1px solid #cbd5e1; border-radius: .3rem; background: white; }
     select { min-width: 220px; }
     table { width: 100%; border-collapse: collapse; margin-top: 1rem; background: white; }
     th, td { border-bottom: 1px solid #dbe3ed; text-align: left; padding: .65rem .45rem; vertical-align: top; }
     th { background: #f1f5f9; }
-    #message { min-height: 1.5rem; font-weight: 600; }
-    #reconciliation { white-space: pre-line; }
-    .money-out { color: #991b1b; }
-    .money-in { color: #166534; }
-    .status-pass { color: #166534; font-weight: 700; }
+    #message { min-height: 1.5rem; font-weight: 600; } #reconciliation { white-space: pre-line; }
+    .money-out { color: #991b1b; } .money-in { color: #166534; } .status-pass { color: #166534; font-weight: 700; }
     .support-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
     .scroll { max-height: 320px; overflow: auto; border: 1px solid #e2e8f0; border-radius: .4rem; }
-    .scroll table { margin: 0; }
-    .event-details { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .82rem; white-space: pre-wrap; }
-    @media (max-width: 900px) {
-      .support-grid { grid-template-columns: 1fr; }
-    }
-    @media (max-width: 760px) {
-      table { display: block; overflow-x: auto; }
-      .button, button { width: 100%; text-align: center; }
-    }
+    .scroll table { margin: 0; } .event-details { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .82rem; white-space: pre-wrap; }
+    dialog { width: min(680px, calc(100% - 2rem)); border: 0; border-radius: .7rem; padding: 0; box-shadow: 0 24px 60px rgba(15, 23, 42, .28); }
+    dialog::backdrop { background: rgba(15, 23, 42, .55); }
+    .dialog-body { padding: 1.25rem; } .dialog-actions { display: flex; justify-content: flex-end; gap: .6rem; padding: 1rem 1.25rem; background: #f8fafc; border-top: 1px solid #e2e8f0; }
+    .check-list { display: grid; gap: .6rem; margin: 1rem 0; } .check { padding: .7rem; border: 1px solid #e2e8f0; border-radius: .4rem; }
+    .summary-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .6rem; margin: 1rem 0; }
+    .summary-item { background: #f8fafc; border: 1px solid #e2e8f0; padding: .75rem; border-radius: .4rem; }
+    @media (max-width: 900px) { .support-grid { grid-template-columns: 1fr; } }
+    @media (max-width: 760px) { table { display: block; overflow-x: auto; } .button, button { width: 100%; text-align: center; } .summary-grid { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
   <div class="header-row">
-    <h1>Bursar Cashbook Review</h1>
-    <span id="app-version" class="version">Loading version…</span>
+    <div class="header-title">
+      <h1>Bursar Cashbook</h1>
+      <span id="app-version" class="version">Loading version…</span>
+    </div>
+    <div class="actions">
+      <button class="secondary" type="button" id="open-setup">Setup</button>
+      <a class="button secondary" href="/help">Help</a>
+    </div>
   </div>
-  <p class="muted">Standard Bank prototype. Every imported transaction requires bursar review before export.</p>
+  <p class="muted">Standard Bank pilot. Every imported transaction requires bursar review before export.</p>
 
   <section class="panel">
     <h2>1. Import statement</h2>
     <form id="upload-form">
-      <label>
-        Bank
-        <select name="bank">
-          <option selected>Standard Bank</option>
-        </select>
-      </label>
-      <label>
-        Statement
-        <input name="file" type="file" accept=".csv,.xls,.xlsx" required>
-      </label>
+      <label>Bank<select name="bank"><option selected>Standard Bank</option></select></label>
+      <label>Statement<input name="file" type="file" accept=".csv,.xls,.xlsx" required></label>
       <button type="submit">Upload statement</button>
     </form>
     <p id="reconciliation" class="muted"></p>
@@ -70,277 +64,206 @@
   <section class="panel">
     <h2>2. Categories</h2>
     <form id="category-form">
-      <label>
-        New category
-        <input name="name" placeholder="e.g. LTSM: Stationery" required>
-      </label>
-      <label>
-        Type
-        <select name="type">
-          <option value="expense">Expense</option>
-          <option value="income">Income</option>
-        </select>
-      </label>
+      <label>New category<input name="name" placeholder="e.g. LTSM: Stationery" required></label>
+      <label>Type<select name="type"><option value="expense">Expense</option><option value="income">Income</option></select></label>
       <button type="submit">Add category</button>
     </form>
   </section>
 
   <section class="panel">
     <h2>3. Export</h2>
-    <form id="export-form" onsubmit="return false">
-      <label>
-        Financial year
-        <input id="export-year" type="number" min="2000" max="2100" required>
-      </label>
-      <a id="reviewed-export" class="button" href="#">Download reviewed cashbook</a>
-      <a id="wced-export" class="button" href="#">Download WCED cashbook</a>
-    </form>
-    <p class="muted">Exports are blocked while any transaction in that year is still pending review.</p>
+    <div class="actions">
+      <label>Financial year<input id="export-year" type="number" min="2000" max="2100" required></label>
+      <button type="button" id="reviewed-export">Generate reviewed cashbook</button>
+      <button type="button" id="wced-export">Generate WCED cashbook</button>
+    </div>
+    <p class="muted">A confirmation summary is shown before every export. Exports remain blocked while transactions are pending.</p>
   </section>
 
   <p id="message"></p>
 
   <h2>Pending review</h2>
   <table>
-    <thead>
-      <tr>
-        <th>Date</th>
-        <th>Description</th>
-        <th>Reference</th>
-        <th>Amount</th>
-        <th>Balance</th>
-        <th>Suggestion</th>
-        <th>Approve / correct</th>
-      </tr>
-    </thead>
+    <thead><tr><th>Date</th><th>Description</th><th>Reference</th><th>Amount</th><th>Balance</th><th>Suggestion</th><th>Approve / correct</th></tr></thead>
     <tbody id="rows"></tbody>
   </table>
 
   <section class="panel">
     <h2>Support & history</h2>
-    <p class="muted">If something breaks, download the diagnostic report and send the ZIP to the developer. It excludes full transaction descriptions and bank references.</p>
+    <p class="muted">If something breaks, download the support bundle and send the ZIP to the developer. It excludes full transaction descriptions and bank references.</p>
     <div class="actions">
-      <a class="button" href="/diagnostics/export">Download diagnostic report</a>
+      <a class="button" href="/diagnostics/export">Download support bundle</a>
       <button class="secondary" type="button" id="refresh-history">Refresh history</button>
     </div>
-
     <div class="support-grid">
-      <div>
-        <h3>Import history</h3>
-        <div class="scroll">
-          <table>
-            <thead>
-              <tr><th>When</th><th>Period</th><th>Imported</th><th>Review</th><th>Recon</th></tr>
-            </thead>
-            <tbody id="import-history"></tbody>
-          </table>
-        </div>
-      </div>
-
-      <div>
-        <h3>Audit history</h3>
-        <div class="scroll">
-          <table>
-            <thead>
-              <tr><th>When</th><th>Event</th><th>Details</th></tr>
-            </thead>
-            <tbody id="audit-history"></tbody>
-          </table>
-        </div>
-      </div>
+      <div><h3>Import history</h3><div class="scroll"><table><thead><tr><th>When</th><th>Period</th><th>Imported</th><th>Review</th><th>Recon</th></tr></thead><tbody id="import-history"></tbody></table></div></div>
+      <div><h3>Audit history</h3><div class="scroll"><table><thead><tr><th>When</th><th>Event</th><th>Details</th></tr></thead><tbody id="audit-history"></tbody></table></div></div>
     </div>
   </section>
 
+  <section class="panel">
+    <h2>Backups</h2>
+    <p class="muted">A safety backup is created automatically before imports and restores. Restore only when you intentionally need to return to an earlier database state.</p>
+    <div class="actions"><button type="button" id="create-backup">Create backup now</button><button class="secondary" type="button" id="refresh-backups">Refresh backups</button></div>
+    <div class="scroll"><table><thead><tr><th>Created</th><th>Size</th><th>Backup</th><th>Action</th></tr></thead><tbody id="backup-history"></tbody></table></div>
+  </section>
+
+  <dialog id="setup-dialog">
+    <div class="dialog-body">
+      <h2>Cashbook setup</h2>
+      <p class="muted">These checks make sure this installation is ready for the pilot.</p>
+      <div id="setup-checks" class="check-list"></div>
+      <form id="template-form">
+        <label>Blank WCED .xls template<input name="file" type="file" accept=".xls" required></label>
+        <label><span>Replace existing template</span><input name="replace" type="checkbox"></label>
+        <button type="submit">Save WCED template</button>
+      </form>
+      <p id="setup-message" class="muted"></p>
+    </div>
+    <div class="dialog-actions"><button type="button" class="secondary" id="close-setup">Close</button></div>
+  </dialog>
+
+  <dialog id="export-dialog">
+    <div class="dialog-body">
+      <h2 id="export-dialog-title">Confirm export</h2>
+      <div id="export-summary"></div>
+    </div>
+    <div class="dialog-actions"><button type="button" class="secondary" id="cancel-export">Cancel</button><button type="button" id="confirm-export">Generate cashbook</button></div>
+  </dialog>
+
   <script>
     let categories = [];
+    let pendingExport = null;
     const message = document.querySelector('#message');
     const reconciliation = document.querySelector('#reconciliation');
     const yearInput = document.querySelector('#export-year');
-    const reviewedExport = document.querySelector('#reviewed-export');
-    const wcedExport = document.querySelector('#wced-export');
+    const setupDialog = document.querySelector('#setup-dialog');
+    const exportDialog = document.querySelector('#export-dialog');
 
-    const escapeHtml = value => String(value ?? '').replace(/[&<>'"]/g, char => ({
-      '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
-    }[char]));
+    const escapeHtml = value => String(value ?? '').replace(/[&<>'"]/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
+    const formatDateTime = value => { if (!value) return ''; const parsed = new Date(value); return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString(); };
+    const apiError = (data, fallback='Request failed.') => data?.error_id ? `${data?.detail || fallback} Error ID: ${data.error_id}` : (data?.detail || fallback);
+    const formatBytes = bytes => bytes < 1024 * 1024 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 
-    function formatDateTime(value) {
-      if (!value) return '';
-      const parsed = new Date(value);
-      return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString();
-    }
-
-    function apiError(data, fallback = 'Request failed.') {
-      const detail = data?.detail || fallback;
-      return data?.error_id ? `${detail} Error ID: ${data.error_id}` : detail;
-    }
-
-    function updateExportLinks() {
-      const year = Number(yearInput.value);
-      reviewedExport.href = `/exports/reviewed-cashbook.xlsx?year=${year}`;
-      wcedExport.href = `/exports/wced-cashbook.xls?year=${year}`;
+    async function readJson(response) {
+      try { return await response.json(); } catch { return {}; }
     }
 
     async function loadHealth() {
       const response = await fetch('/health');
       const data = await response.json();
-      document.querySelector('#app-version').textContent = `Prototype v${data.version}`;
+      document.querySelector('#app-version').textContent = `Pilot v${data.version}`;
+    }
+
+    async function loadSetup({openWhenIncomplete=false} = {}) {
+      const response = await fetch('/setup/status');
+      const data = await response.json();
+      document.querySelector('#setup-checks').innerHTML = data.checks.map(check => `<div class="check"><div class="${check.ok ? 'good' : 'bad'}">${check.ok ? '✓' : '✗'} ${escapeHtml(check.label)}</div><div class="muted">${escapeHtml(check.message)}</div></div>`).join('');
+      if (openWhenIncomplete && !data.ready_for_wced_export) setupDialog.showModal();
+      return data;
     }
 
     async function load() {
-      const [categoryResponse, transactionResponse] = await Promise.all([
-        fetch('/categories'),
-        fetch('/transactions/pending')
-      ]);
-
+      const [categoryResponse, transactionResponse] = await Promise.all([fetch('/categories'), fetch('/transactions/pending')]);
       categories = await categoryResponse.json();
       const transactions = await transactionResponse.json();
-
       document.querySelector('#rows').innerHTML = transactions.map(transaction => {
         const requiredType = transaction.direction === 'debit' ? 'expense' : 'income';
         const validCategories = categories.filter(category => category.type === requiredType);
-        const blankSelected = transaction.suggested_category_id ? '' : 'selected';
-        const blank = `<option value="" ${blankSelected} disabled>Select category</option>`;
-        const options = validCategories.map(category => (
-          `<option value="${category.id}" ${category.id === transaction.suggested_category_id ? 'selected' : ''}>${escapeHtml(category.name)}</option>`
-        )).join('');
-
-        const suggestion = transaction.suggested_category
-          ? `${escapeHtml(transaction.suggested_category)} (${Math.round(transaction.confidence * 100)}%)`
-          : 'No suggestion';
-
+        const blank = `<option value="" ${transaction.suggested_category_id ? '' : 'selected'} disabled>Select category</option>`;
+        const options = validCategories.map(category => `<option value="${category.id}" ${category.id === transaction.suggested_category_id ? 'selected' : ''}>${escapeHtml(category.name)}</option>`).join('');
+        const suggestion = transaction.suggested_category ? `${escapeHtml(transaction.suggested_category)} (${Math.round(transaction.confidence * 100)}%)` : 'No suggestion';
         const sign = transaction.direction === 'debit' ? '-' : '+';
-        const amountClass = transaction.direction === 'debit' ? 'money-out' : 'money-in';
-
-        return `<tr>
-          <td>${escapeHtml(transaction.date)}</td>
-          <td>${escapeHtml(transaction.description)}</td>
-          <td>${escapeHtml(transaction.reference || '')}</td>
-          <td class="${amountClass}">${sign} R${escapeHtml(transaction.amount)}</td>
-          <td>R${escapeHtml(transaction.balance_after)}</td>
-          <td>${suggestion}</td>
-          <td>
-            <select id="category-${transaction.id}">${blank}${options}</select>
-            <button type="button" onclick="review(${transaction.id})">Save</button>
-          </td>
-        </tr>`;
+        return `<tr><td>${escapeHtml(transaction.date)}</td><td>${escapeHtml(transaction.description)}</td><td>${escapeHtml(transaction.reference || '')}</td><td class="${transaction.direction === 'debit' ? 'money-out' : 'money-in'}">${sign} R${escapeHtml(transaction.amount)}</td><td>R${escapeHtml(transaction.balance_after)}</td><td>${suggestion}</td><td><select id="category-${transaction.id}">${blank}${options}</select> <button type="button" onclick="review(${transaction.id})">Save</button></td></tr>`;
       }).join('') || '<tr><td colspan="7">Nothing waiting for review.</td></tr>';
     }
 
     async function loadHistory() {
-      const [importsResponse, auditResponse] = await Promise.all([
-        fetch('/imports/history?limit=50'),
-        fetch('/audit/history?limit=100')
-      ]);
+      const [importsResponse, auditResponse] = await Promise.all([fetch('/imports/history?limit=50'), fetch('/audit/history?limit=100')]);
+      const imports = await importsResponse.json(); const events = await auditResponse.json();
+      document.querySelector('#import-history').innerHTML = imports.map(item => `<tr><td>${escapeHtml(formatDateTime(item.uploaded_at))}</td><td>${escapeHtml(item.period_start)} → ${escapeHtml(item.period_end)}</td><td>${item.transactions_imported}/${item.source_transactions}<br><span class="muted">${item.duplicates_skipped} duplicate(s)</span></td><td>${item.pending} pending<br>${item.approved} approved<br>${item.corrected} corrected</td><td class="status-pass">${escapeHtml(item.reconciliation_status.toUpperCase())}<br><span class="muted">Δ R${escapeHtml(item.reconciliation_difference)}</span></td></tr>`).join('') || '<tr><td colspan="5">No imports yet.</td></tr>';
+      document.querySelector('#audit-history').innerHTML = events.map(event => `<tr><td>${escapeHtml(formatDateTime(event.created_at))}</td><td>${escapeHtml(event.event_type)}</td><td class="event-details">${escapeHtml(JSON.stringify(event.details))}</td></tr>`).join('') || '<tr><td colspan="3">No audit events yet.</td></tr>';
+    }
 
-      const imports = await importsResponse.json();
-      const events = await auditResponse.json();
-
-      document.querySelector('#import-history').innerHTML = imports.map(item => (
-        `<tr>
-          <td>${escapeHtml(formatDateTime(item.uploaded_at))}</td>
-          <td>${escapeHtml(item.period_start)} → ${escapeHtml(item.period_end)}</td>
-          <td>${item.transactions_imported}/${item.source_transactions}<br><span class="muted">${item.duplicates_skipped} duplicate(s)</span></td>
-          <td>${item.pending} pending<br>${item.approved} approved<br>${item.corrected} corrected</td>
-          <td class="status-pass">${escapeHtml(item.reconciliation_status.toUpperCase())}<br><span class="muted">Δ R${escapeHtml(item.reconciliation_difference)}</span></td>
-        </tr>`
-      )).join('') || '<tr><td colspan="5">No imports yet.</td></tr>';
-
-      document.querySelector('#audit-history').innerHTML = events.map(event => (
-        `<tr>
-          <td>${escapeHtml(formatDateTime(event.created_at))}</td>
-          <td>${escapeHtml(event.event_type)}</td>
-          <td class="event-details">${escapeHtml(JSON.stringify(event.details))}</td>
-        </tr>`
-      )).join('') || '<tr><td colspan="3">No audit events yet.</td></tr>';
+    async function loadBackups() {
+      const response = await fetch('/backups'); const backups = await response.json();
+      document.querySelector('#backup-history').innerHTML = backups.map(item => `<tr><td>${escapeHtml(formatDateTime(item.modified_at))}</td><td>${formatBytes(item.size_bytes)}</td><td>${escapeHtml(item.filename)}</td><td><button type="button" class="danger" onclick="restoreBackup('${escapeHtml(item.filename)}')">Restore</button></td></tr>`).join('') || '<tr><td colspan="4">No backups yet.</td></tr>';
     }
 
     async function review(id) {
       const categoryId = Number(document.querySelector(`#category-${id}`).value);
-      if (!categoryId) {
-        message.textContent = 'Select a category before saving.';
-        return;
-      }
-
-      const response = await fetch(`/transactions/${id}/review`, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({category_id: categoryId, learn: true})
-      });
-      const data = await response.json();
-
-      if (!response.ok) {
-        message.textContent = apiError(data);
-        return;
-      }
-
+      if (!categoryId) { message.textContent = 'Select a category before saving.'; return; }
+      const response = await fetch(`/transactions/${id}/review`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({category_id:categoryId, learn:true})});
+      const data = await readJson(response);
+      if (!response.ok) { message.textContent = apiError(data); return; }
       message.textContent = data.idempotent ? 'Already saved.' : `Saved as ${data.status}.`;
       await Promise.all([load(), loadHistory()]);
     }
 
+    async function prepareExport(kind) {
+      const year = Number(yearInput.value);
+      const response = await fetch(`/exports/summary?year=${year}`); const data = await readJson(response);
+      if (!response.ok) { message.textContent = apiError(data); return; }
+      const ready = kind === 'wced' ? data.ready_for_wced_export : data.ready_for_reviewed_export;
+      document.querySelector('#export-dialog-title').textContent = kind === 'wced' ? `Generate ${year} WCED cashbook?` : `Generate ${year} reviewed cashbook?`;
+      document.querySelector('#export-summary').innerHTML = `<div class="summary-grid"><div class="summary-item"><strong>Transactions</strong><br>${data.transaction_count}</div><div class="summary-item"><strong>Reviewed</strong><br>${data.reviewed}</div><div class="summary-item"><strong>Pending</strong><br>${data.pending}</div><div class="summary-item"><strong>Statements</strong><br>${data.statement_count}</div><div class="summary-item"><strong>Money in</strong><br>R${escapeHtml(data.money_in)}</div><div class="summary-item"><strong>Money out</strong><br>R${escapeHtml(data.money_out)}</div><div class="summary-item"><strong>Reconciliation</strong><br><span class="${data.all_statements_reconciled ? 'good' : 'bad'}">${data.all_statements_reconciled ? 'PASSED' : 'NOT READY'}</span></div><div class="summary-item"><strong>Difference</strong><br>R${escapeHtml(data.reconciliation_difference)}</div></div>${kind === 'wced' && !data.wced_template_configured ? '<p class="bad">WCED template is not configured. Open Setup first.</p>' : ''}${ready ? '<p class="good">Ready to export.</p>' : '<p class="bad">Export is blocked until the items above are resolved.</p>'}`;
+      pendingExport = ready ? {kind, year} : null;
+      document.querySelector('#confirm-export').disabled = !ready;
+      exportDialog.showModal();
+    }
+
+    async function downloadFile(url) {
+      const response = await fetch(url);
+      if (!response.ok) { const data = await readJson(response); message.textContent = apiError(data, 'Export failed.'); return; }
+      const blob = await response.blob();
+      const disposition = response.headers.get('Content-Disposition') || '';
+      const match = disposition.match(/filename="?([^";]+)"?/i);
+      const filename = match ? match[1] : 'cashbook-export';
+      const objectUrl = URL.createObjectURL(blob); const anchor = document.createElement('a'); anchor.href = objectUrl; anchor.download = filename; document.body.appendChild(anchor); anchor.click(); anchor.remove(); URL.revokeObjectURL(objectUrl);
+      message.textContent = `${filename} generated successfully.`;
+      await loadHistory();
+    }
+
+    async function restoreBackup(filename) {
+      if (!confirm(`Restore ${filename}?\n\nYour current database will first be backed up automatically. The selected backup will then replace the current data.`)) return;
+      const response = await fetch(`/backups/${encodeURIComponent(filename)}/restore`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({confirm:true})});
+      const data = await readJson(response);
+      if (!response.ok) { message.textContent = apiError(data, 'Restore failed.'); return; }
+      alert(`${data.message}\n\nSafety backup: ${data.safety_backup}`);
+      window.location.reload();
+    }
+
     document.querySelector('#upload-form').addEventListener('submit', async event => {
-      event.preventDefault();
-      message.textContent = 'Importing...';
-      reconciliation.textContent = '';
-
-      const response = await fetch('/statements/upload', {
-        method: 'POST',
-        body: new FormData(event.target)
-      });
-      const data = await response.json();
-
-      if (!response.ok) {
-        message.textContent = apiError(data);
-        return;
-      }
-
+      event.preventDefault(); message.textContent = 'Importing and reconciling statement…'; reconciliation.textContent = '';
+      const response = await fetch('/statements/upload', {method:'POST', body:new FormData(event.target)}); const data = await readJson(response);
+      if (!response.ok) { message.textContent = apiError(data); return; }
       message.textContent = `${data.transactions_imported} transaction(s) imported; ${data.duplicates_skipped} duplicate(s) skipped; ${data.pending_review} require review.`;
-      reconciliation.textContent = [
-        'Reconciliation: PASSED',
-        `Opening balance: R${data.reconciliation.opening_balance}`,
-        `Money in: R${data.reconciliation.total_credits}`,
-        `Money out: R${data.reconciliation.total_debits}`,
-        `Closing balance: R${data.reconciliation.closing_balance}`,
-        `Difference: R${data.reconciliation.difference}`
-      ].join('\n');
-
-      yearInput.value = Number(data.period.start.slice(0, 4));
-      updateExportLinks();
-      event.target.reset();
-      await Promise.all([load(), loadHistory()]);
+      reconciliation.textContent = ['Reconciliation: PASSED', `Opening balance: R${data.reconciliation.opening_balance}`, `Money in: R${data.reconciliation.total_credits}`, `Money out: R${data.reconciliation.total_debits}`, `Closing balance: R${data.reconciliation.closing_balance}`, `Difference: R${data.reconciliation.difference}`].join('\n');
+      yearInput.value = Number(data.period.start.slice(0, 4)); event.target.reset(); await Promise.all([load(), loadHistory(), loadBackups()]);
     });
 
     document.querySelector('#category-form').addEventListener('submit', async event => {
-      event.preventDefault();
-      const form = new FormData(event.target);
-      const response = await fetch('/categories', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({name: form.get('name'), type: form.get('type')})
-      });
-      const data = await response.json();
-
-      message.textContent = response.ok ? `${data.name} added.` : apiError(data);
-      if (response.ok) {
-        event.target.reset();
-        await Promise.all([load(), loadHistory()]);
-      }
+      event.preventDefault(); const form = new FormData(event.target); const response = await fetch('/categories', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name:form.get('name'), type:form.get('type')})}); const data = await readJson(response);
+      message.textContent = response.ok ? `${data.name} added.` : apiError(data); if (response.ok) { event.target.reset(); await Promise.all([load(), loadHistory()]); }
     });
 
-    document.querySelector('#refresh-history').addEventListener('click', () => {
-      loadHistory().catch(error => {
-        console.error(error);
-        message.textContent = 'Could not refresh history.';
-      });
+    document.querySelector('#template-form').addEventListener('submit', async event => {
+      event.preventDefault(); const form = new FormData(event.target); form.set('replace', form.get('replace') ? 'true' : 'false'); const response = await fetch('/setup/wced-template', {method:'POST', body:form}); const data = await readJson(response);
+      document.querySelector('#setup-message').textContent = response.ok ? 'WCED template saved successfully.' : apiError(data); if (response.ok) await loadSetup();
     });
+
+    document.querySelector('#create-backup').addEventListener('click', async () => { const response = await fetch('/backups', {method:'POST'}); const data = await readJson(response); message.textContent = response.ok ? data.message : apiError(data); if (response.ok) await Promise.all([loadBackups(), loadHistory()]); });
+    document.querySelector('#refresh-backups').addEventListener('click', loadBackups);
+    document.querySelector('#refresh-history').addEventListener('click', loadHistory);
+    document.querySelector('#open-setup').addEventListener('click', async () => { await loadSetup(); setupDialog.showModal(); });
+    document.querySelector('#close-setup').addEventListener('click', () => setupDialog.close());
+    document.querySelector('#reviewed-export').addEventListener('click', () => prepareExport('reviewed'));
+    document.querySelector('#wced-export').addEventListener('click', () => prepareExport('wced'));
+    document.querySelector('#cancel-export').addEventListener('click', () => { pendingExport = null; exportDialog.close(); });
+    document.querySelector('#confirm-export').addEventListener('click', async () => { if (!pendingExport) return; const {kind, year} = pendingExport; pendingExport = null; exportDialog.close(); const url = kind === 'wced' ? `/exports/wced-cashbook.xls?year=${year}` : `/exports/reviewed-cashbook.xlsx?year=${year}`; await downloadFile(url); });
 
     yearInput.value = new Date().getFullYear();
-    yearInput.addEventListener('input', updateExportLinks);
-    updateExportLinks();
-
-    Promise.all([loadHealth(), load(), loadHistory()]).catch(error => {
-      console.error(error);
-      message.textContent = 'Could not load the review screen.';
-    });
+    Promise.all([loadHealth(), load(), loadHistory(), loadBackups(), loadSetup({openWhenIncomplete:true})]).catch(error => { console.error(error); message.textContent = 'Could not load the cashbook. Open Help and download a support bundle if the problem continues.'; });
   </script>
 </body>
 </html>

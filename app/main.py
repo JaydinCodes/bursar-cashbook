@@ -1,7 +1,6 @@
 from datetime import date, datetime
 from hashlib import sha256
 from io import BytesIO
-import os
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
@@ -12,8 +11,21 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from .audit import audit_event_to_dict, record_audit_event
-from .backups import create_sqlite_backup
+from .backups import (
+    BACKUP_DIR,
+    create_sqlite_backup,
+    list_sqlite_backups,
+    restore_sqlite_backup,
+)
 from .bank_parser import StatementParseError, parse_statement
+from .config import (
+    CONFIG_DIR,
+    DEFAULT_WCED_TEMPLATE,
+    ensure_writable_directory,
+    get_wced_template_path,
+    get_wced_template_source,
+    is_wced_template_ready,
+)
 from .categorize import (
     categorize,
     learn_from_correction,
@@ -24,7 +36,7 @@ from .db import SessionLocal, engine, init_db
 from .diagnostics import build_diagnostics_zip
 from .errors import new_error_id
 from .fingerprints import standard_bank_transaction_fingerprint
-from .logging_config import logger
+from .logging_config import LOG_DIR, logger
 from .models import AuditEvent, Category, Statement, Transaction
 from .reconciliation import StatementReconciliationError, reconcile_statement
 from .version import APP_VERSION
@@ -36,8 +48,10 @@ from .wced_export import (
 
 app = FastAPI(title="Bursar Cashbook Automation", version=APP_VERSION)
 REVIEW_PAGE = Path(__file__).parent / "static" / "review.html"
+HELP_PAGE = Path(__file__).parent / "static" / "help.html"
 FINAL_STATUSES = ("approved", "corrected")
 MAX_UPLOAD_BYTES = 15 * 1024 * 1024
+MAX_TEMPLATE_BYTES = 10 * 1024 * 1024
 
 
 class ReviewDecision(BaseModel):
@@ -48,6 +62,10 @@ class ReviewDecision(BaseModel):
 class CategoryCreate(BaseModel):
     name: str
     type: str = "expense"
+
+
+class RestoreBackupRequest(BaseModel):
+    confirm: bool = False
 
 
 @app.on_event("startup")
@@ -123,6 +141,11 @@ def health():
 @app.get("/", include_in_schema=False)
 def review_page():
     return FileResponse(REVIEW_PAGE)
+
+
+@app.get("/help", include_in_schema=False)
+def help_page():
+    return FileResponse(HELP_PAGE)
 
 
 def get_db():
@@ -221,6 +244,278 @@ def _statement_history_item(db: Session, statement: Statement) -> dict:
         "reconciliation_status": statement.reconciliation_status,
         "reconciliation_difference": str(statement.reconciliation_difference),
     }
+
+
+
+def _setup_status(db: Session) -> dict:
+    category_count = db.query(Category).count()
+    database_ok = True
+    backup_writable = ensure_writable_directory(BACKUP_DIR)
+    log_writable = ensure_writable_directory(LOG_DIR)
+    config_writable = ensure_writable_directory(CONFIG_DIR)
+    template_ready = is_wced_template_ready()
+
+    checks = [
+        {
+            "id": "database",
+            "label": "Local cashbook database",
+            "ok": database_ok,
+            "message": "Database is ready." if database_ok else "Database is unavailable.",
+        },
+        {
+            "id": "categories",
+            "label": "Cashbook categories",
+            "ok": category_count > 0,
+            "message": (
+                f"{category_count} categories loaded."
+                if category_count > 0
+                else "No categories are loaded. Contact support before importing real statements."
+            ),
+        },
+        {
+            "id": "wced_template",
+            "label": "WCED cashbook template",
+            "ok": template_ready,
+            "message": (
+                f"Template ready ({get_wced_template_source()})."
+                if template_ready
+                else "Upload the blank WCED .xls template before generating WCED exports."
+            ),
+        },
+        {
+            "id": "backups",
+            "label": "Backup storage",
+            "ok": backup_writable,
+            "message": "Backup folder is writable." if backup_writable else "Backup folder is not writable.",
+        },
+        {
+            "id": "logs",
+            "label": "Diagnostic logs",
+            "ok": log_writable,
+            "message": "Log folder is writable." if log_writable else "Log folder is not writable.",
+        },
+    ]
+
+    return {
+        "version": APP_VERSION,
+        "bank": "Standard Bank",
+        "category_count": category_count,
+        "template_configured": template_ready,
+        "template_source": get_wced_template_source(),
+        "ready_for_import": database_ok and category_count > 0 and backup_writable and log_writable,
+        "ready_for_wced_export": (
+            database_ok
+            and category_count > 0
+            and template_ready
+            and backup_writable
+            and log_writable
+            and config_writable
+        ),
+        "checks": checks,
+    }
+
+
+@app.get("/setup/status")
+def setup_status(db: Session = Depends(get_db)):
+    return _setup_status(db)
+
+
+def _validate_wced_template(content: bytes) -> None:
+    import xlrd
+
+    try:
+        workbook = xlrd.open_workbook(file_contents=content, on_demand=True)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=422,
+            detail="That file is not a readable legacy .xls workbook.",
+        ) from exc
+
+    required = {
+        f"{month} {suffix}"
+        for month in ("Jan", "Feb", "Mar", "April", "May", "June", "July", "Aug", "Sept", "Oct", "Nov", "Dec")
+        for suffix in ("PC", "RC")
+    }
+    missing = sorted(required.difference(workbook.sheet_names()))
+    workbook.release_resources()
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "This does not look like the expected WCED cashbook template. "
+                f"Missing sheet(s): {', '.join(missing[:6])}"
+                + ("…" if len(missing) > 6 else "")
+            ),
+        )
+
+
+@app.post("/setup/wced-template")
+async def upload_wced_template(
+    file: UploadFile = File(...),
+    replace: bool = Form(False),
+    db: Session = Depends(get_db),
+):
+    filename = file.filename or "template.xls"
+    if Path(filename).suffix.lower() != ".xls":
+        raise HTTPException(status_code=422, detail="The WCED template must be a legacy .xls file.")
+
+    content = await file.read(MAX_TEMPLATE_BYTES + 1)
+    if not content:
+        raise HTTPException(status_code=400, detail="The WCED template file is empty.")
+    if len(content) > MAX_TEMPLATE_BYTES:
+        raise HTTPException(status_code=413, detail="WCED template is too large. Maximum size is 10 MB.")
+
+    _validate_wced_template(content)
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+
+    if DEFAULT_WCED_TEMPLATE.exists() and not replace:
+        raise HTTPException(
+            status_code=409,
+            detail="A local WCED template is already configured. Choose replace to overwrite it.",
+        )
+
+    temporary = DEFAULT_WCED_TEMPLATE.with_suffix(".xls.tmp")
+    temporary.write_bytes(content)
+    temporary.replace(DEFAULT_WCED_TEMPLATE)
+
+    record_audit_event(
+        db,
+        "setup.wced_template_configured",
+        entity_type="application",
+        details={"replaced": replace, "size_bytes": len(content)},
+    )
+    db.commit()
+    logger.info("wced_template_configured", extra={"replaced": replace, "size_bytes": len(content)})
+    return _setup_status(db)
+
+
+@app.get("/backups")
+def backup_history():
+    return list_sqlite_backups()
+
+
+@app.post("/backups", status_code=201)
+def create_manual_backup(db: Session = Depends(get_db)):
+    path = create_sqlite_backup(engine, "manual")
+    if path is None:
+        raise HTTPException(status_code=409, detail="A local SQLite database is not available to back up.")
+
+    record_audit_event(
+        db,
+        "backup.created",
+        entity_type="application",
+        details={"filename": path.name, "reason": "manual"},
+    )
+    db.commit()
+    logger.info("manual_backup_created", extra={"backup_filename": path.name})
+    return {"filename": path.name, "message": "Backup created successfully."}
+
+
+@app.post("/backups/{filename}/restore")
+def restore_backup(filename: str, request: RestoreBackupRequest):
+    if not request.confirm:
+        raise HTTPException(status_code=422, detail="Restore confirmation is required.")
+
+    safety_backup = create_sqlite_backup(engine, "before-restore")
+    if safety_backup is None:
+        raise HTTPException(status_code=409, detail="Could not create the required safety backup before restore.")
+
+    try:
+        restored = restore_sqlite_backup(engine, filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    init_db()
+    db = SessionLocal()
+    try:
+        record_audit_event(
+            db,
+            "backup.restored",
+            entity_type="application",
+            details={
+                "restored_filename": restored.name,
+                "safety_backup_filename": safety_backup.name,
+            },
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    logger.warning(
+        "database_backup_restored",
+        extra={
+            "restored_filename": restored.name,
+            "safety_backup_filename": safety_backup.name,
+        },
+    )
+    return {
+        "restored": restored.name,
+        "safety_backup": safety_backup.name,
+        "message": "Backup restored. Reload the cashbook before continuing.",
+    }
+
+
+def _export_summary(db: Session, year: int) -> dict:
+    start, end = _year_bounds(year)
+    transactions = (
+        db.query(Transaction)
+        .filter(Transaction.txn_date >= start, Transaction.txn_date < end)
+        .order_by(Transaction.txn_date, Transaction.id)
+        .all()
+    )
+
+    statements = (
+        db.query(Statement)
+        .filter(Statement.period_end >= start, Statement.period_start < end)
+        .order_by(Statement.period_start, Statement.id)
+        .all()
+    )
+
+    pending = sum(1 for transaction in transactions if transaction.status == "pending")
+    reviewed = sum(1 for transaction in transactions if transaction.status in FINAL_STATUSES)
+    money_out = sum(
+        (transaction.amount for transaction in transactions if transaction.direction == "debit"),
+        start=0,
+    )
+    money_in = sum(
+        (transaction.amount for transaction in transactions if transaction.direction == "credit"),
+        start=0,
+    )
+    all_reconciled = bool(statements) and all(
+        statement.reconciliation_status == "passed"
+        and statement.reconciliation_difference == 0
+        for statement in statements
+    )
+    difference = sum((statement.reconciliation_difference for statement in statements), start=0)
+
+    return {
+        "year": year,
+        "transaction_count": len(transactions),
+        "reviewed": reviewed,
+        "pending": pending,
+        "money_out": f"{money_out:.2f}",
+        "money_in": f"{money_in:.2f}",
+        "statement_count": len(statements),
+        "all_statements_reconciled": all_reconciled,
+        "reconciliation_difference": f"{difference:.2f}",
+        "wced_template_configured": is_wced_template_ready(),
+        "ready_for_reviewed_export": bool(transactions) and pending == 0 and reviewed == len(transactions) and all_reconciled,
+        "ready_for_wced_export": (
+            bool(transactions)
+            and pending == 0
+            and reviewed == len(transactions)
+            and all_reconciled
+            and is_wced_template_ready()
+        ),
+    }
+
+
+@app.get("/exports/summary")
+def export_summary(
+    year: int = Query(..., ge=2000, le=2100),
+    db: Session = Depends(get_db),
+):
+    return _export_summary(db, year)
 
 
 @app.get("/imports/history")
@@ -772,13 +1067,13 @@ def download_wced_cashbook(
     year: int = Query(..., ge=2000, le=2100),
     db: Session = Depends(get_db),
 ):
-    template_path = os.getenv("WCED_TEMPLATE_PATH")
-    if not template_path:
+    template_path = get_wced_template_path()
+    if template_path is None:
         raise HTTPException(
             status_code=503,
             detail=(
-                "WCED_TEMPLATE_PATH is not configured. Set it to the blank "
-                "WCED .xls cashbook template."
+                "The WCED cashbook template is not configured. Open Setup and upload "
+                "the blank WCED .xls template before exporting."
             ),
         )
 

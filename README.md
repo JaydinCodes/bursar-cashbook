@@ -61,3 +61,18 @@ $env:CASHBOOK_LOG_DIR = "logs"
 $env:CASHBOOK_BACKUP_DIR = "backups"
 $env:CASHBOOK_BACKUP_RETENTION = "10"
 ```
+
+## Phase 3 pilot handover
+
+This build includes a local setup wizard, Windows setup/start scripts, export preflight confirmation, backup/restore controls, a Help page, support documentation, and the pilot checklist.
+
+For a Windows handover:
+
+1. Run `SETUP CASHBOOK.bat` once if `.venv` has not been created.
+2. Run `START CASHBOOK.bat` for normal use.
+3. Open **Setup** and ensure all readiness checks are green.
+4. Upload the blank WCED `.xls` template through Setup if it is not already configured.
+
+The local template is stored at `config/wced-template.xls` and is ignored by Git.
+
+Do not delete `cashbook.db` when applying Phase 3 over the tested Phase 2 prototype.
