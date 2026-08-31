@@ -1,6 +1,7 @@
 import re
 from decimal import Decimal
-from rapidfuzz import process, fuzz
+
+from rapidfuzz import fuzz, process
 from sqlalchemy.orm import Session
 
 from .models import Rule
@@ -9,37 +10,30 @@ SUFFIXES = (" LTD", " PTY", " (PTY)", " CC")
 
 
 def normalize_payee(raw: str) -> str:
-    s = raw.strip().upper()
-    s = re.sub(r"\s+", " ", s)
+    normalized = raw.strip().upper()
+    normalized = re.sub(r"\s+", " ", normalized)
+
     for suffix in SUFFIXES:
-        if s.endswith(suffix):
-            s = s[: -len(suffix)].strip()
-    return s
+        if normalized.endswith(suffix):
+            normalized = normalized[: -len(suffix)].strip()
+
+    return normalized
 
 
 def categorize(payee_raw: str, db: Session, fuzzy_threshold: int = 90):
-    """
-    Returns (category_id, confidence, method).
-    method is one of: exact | fuzzy | unknown | no_rules
-    A payee can have multiple historical rules (paid for different things at
-    different times) -- exact match picks the highest-confidence rule, but
-    confidence itself reflects how often that category actually applied.
-    """
-    norm = normalize_payee(payee_raw)
-    exact_rules = db.query(Rule).filter(Rule.payee_pattern == norm).all()
+    """Return (category_id, confidence, method) for an expense description."""
+    normalized = normalize_payee(payee_raw)
+    exact_rules = db.query(Rule).filter(Rule.payee_pattern == normalized).all()
 
     if exact_rules:
-        best = max(exact_rules, key=lambda r: (r.confidence, r.hit_count, -r.id))
+        best = max(exact_rules, key=lambda rule: (rule.confidence, rule.hit_count, -rule.id))
         return best.category_id, float(best.confidence), "exact"
 
     all_rules = db.query(Rule).all()
     if not all_rules:
         return None, 0.0, "no_rules"
 
-    # A payee may legitimately have several categories.  Keep the best rule
-    # for each payee before fuzzy matching; a dictionary comprehension would
-    # otherwise keep whichever row happened to be returned last.
-    choices = {}
+    choices: dict[str, Rule] = {}
     for rule in all_rules:
         current = choices.get(rule.payee_pattern)
         if current is None or (rule.confidence, rule.hit_count, -rule.id) > (
@@ -48,27 +42,100 @@ def categorize(payee_raw: str, db: Session, fuzzy_threshold: int = 90):
             -current.id,
         ):
             choices[rule.payee_pattern] = rule
-    match = process.extractOne(norm, choices.keys(), scorer=fuzz.token_sort_ratio)
+
+    match = process.extractOne(normalized, choices.keys(), scorer=fuzz.token_sort_ratio)
     if match and match[1] >= fuzzy_threshold:
         rule = choices[match[0]]
-        return rule.category_id, (match[1] / 100) * float(rule.confidence), "fuzzy"
+        confidence = (match[1] / 100) * float(rule.confidence)
+        return rule.category_id, confidence, "fuzzy"
 
     return None, 0.0, "unknown"
 
 
-def learn_from_correction(payee_raw: str, category_id: int, db: Session) -> Rule:
-    """Record one bursar-approved classification and rebalance its rules."""
-    payee = normalize_payee(payee_raw)
+def _rebalance_rules(payee: str, db: Session) -> None:
     rules = db.query(Rule).filter(Rule.payee_pattern == payee).all()
-    selected = next((rule for rule in rules if rule.category_id == category_id), None)
-    if selected is None:
-        selected = Rule(payee_pattern=payee, category_id=category_id, hit_count=0, confidence=0)
-        db.add(selected)
-        rules.append(selected)
-    selected.hit_count += 1
+    positive_rules = [rule for rule in rules if rule.hit_count > 0]
+    total = sum(rule.hit_count for rule in positive_rules)
+
+    for rule in rules:
+        if rule.hit_count <= 0:
+            db.delete(rule)
+            continue
+
+        rule.confidence = Decimal(rule.hit_count) / Decimal(total)
+
     db.flush()
 
-    total = sum(rule.hit_count for rule in rules)
-    for rule in rules:
-        rule.confidence = Decimal(rule.hit_count) / Decimal(total)
+
+def learn_from_correction(payee_raw: str, category_id: int, db: Session) -> Rule:
+    """Add one learning vote for a bursar-approved expense classification."""
+    payee = normalize_payee(payee_raw)
+    selected = (
+        db.query(Rule)
+        .filter(
+            Rule.payee_pattern == payee,
+            Rule.category_id == category_id,
+        )
+        .first()
+    )
+
+    if selected is None:
+        selected = Rule(
+            payee_pattern=payee,
+            category_id=category_id,
+            hit_count=0,
+            confidence=0,
+        )
+        db.add(selected)
+        db.flush()
+
+    selected.hit_count += 1
+    _rebalance_rules(payee, db)
     return selected
+
+
+def move_learning_vote(
+    payee_raw: str,
+    old_category_id: int,
+    new_category_id: int,
+    db: Session,
+) -> None:
+    """Move an existing transaction's learning vote without double-counting it."""
+    if old_category_id == new_category_id:
+        return
+
+    payee = normalize_payee(payee_raw)
+
+    old_rule = (
+        db.query(Rule)
+        .filter(
+            Rule.payee_pattern == payee,
+            Rule.category_id == old_category_id,
+        )
+        .first()
+    )
+
+    if old_rule is not None and old_rule.hit_count > 0:
+        old_rule.hit_count -= 1
+
+    new_rule = (
+        db.query(Rule)
+        .filter(
+            Rule.payee_pattern == payee,
+            Rule.category_id == new_category_id,
+        )
+        .first()
+    )
+
+    if new_rule is None:
+        new_rule = Rule(
+            payee_pattern=payee,
+            category_id=new_category_id,
+            hit_count=0,
+            confidence=0,
+        )
+        db.add(new_rule)
+        db.flush()
+
+    new_rule.hit_count += 1
+    _rebalance_rules(payee, db)

@@ -1,40 +1,30 @@
-"""Statement import adapters for common South African bank CSV exports."""
+"""Strict Standard Bank statement parser for the single-bursar prototype."""
+
 import csv
 import io
 import re
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
-import xlrd
 from openpyxl import load_workbook
 
-
-DATE_HEADERS = ("date", "transaction date", "date of transaction", "posting date")
+DATE_HEADERS = ("transaction date", "date", "posting date")
 DESCRIPTION_HEADERS = (
+    "transaction details",
+    "transaction description",
     "description",
     "details",
-    "narration",
-    "transaction description",
-    "payee",
-    "beneficiary",
 )
-DEBIT_HEADERS = ("debit", "withdrawal", "money out", "debits")
-CREDIT_HEADERS = ("credit", "deposit", "money in", "credits")
-AMOUNT_HEADERS = ("amount", "transaction amount", "value")
-
-# These profiles are intentionally aliases, not brittle fixed layouts.  Banks
-# can change exports, so all profiles retain the generic fallback headers.
-BANK_PROFILES = {
-    "fnb": {"names": ("fnb", "first national bank"), "description": ("transaction description",)},
-    "absa": {"names": ("absa",), "description": ("transaction description",)},
-    "standard bank": {
-        "names": ("standard bank", "standard"),
-        "description": ("transaction details", "transaction description"),
-    },
-    "nedbank": {"names": ("nedbank",), "description": ("transaction details",)},
-    "capitec": {"names": ("capitec", "capitec bank"), "description": ("description", "transaction description")},
-}
+DEBIT_HEADERS = ("debit", "debits", "withdrawal", "money out")
+CREDIT_HEADERS = ("credit", "credits", "deposit", "money in")
+AMOUNT_HEADERS = ("amount", "transaction amount")
+BALANCE_HEADERS = ("balance", "running balance", "available balance")
+REFERENCE_HEADERS = (
+    "reference",
+    "transaction reference",
+    "beneficiary reference",
+)
 
 
 class StatementParseError(ValueError):
@@ -43,66 +33,127 @@ class StatementParseError(ValueError):
 
 @dataclass(frozen=True)
 class RawTransaction:
+    source_row: int
     txn_date: date
     description: str
     amount: Decimal
     direction: str
+    balance_after: Decimal
+    reference: str | None = None
+
+
+@dataclass(frozen=True)
+class ParsedStatement:
+    transactions: list[RawTransaction]
+    explicit_opening_balance: Decimal | None = None
+    explicit_closing_balance: Decimal | None = None
 
 
 def _header(value: object) -> str:
-    return re.sub(r"\s+", " ", str(value).strip().lower())
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
 
 
-def _profile_headers(bank: str | None, kind: str, generic: tuple[str, ...]) -> tuple[str, ...]:
-    if not bank:
-        return generic
-    normalised = bank.strip().lower()
-    for profile in BANK_PROFILES.values():
-        if normalised in profile["names"]:
-            return tuple(profile.get(kind, ())) + generic
-    return generic
+def _column_index(
+    headers: list[str],
+    accepted: tuple[str, ...],
+    *,
+    required: bool = False,
+) -> int | None:
+    for name in accepted:
+        if name in headers:
+            return headers.index(name)
 
-
-def _find_header_row(rows: list[list[object]], recognised: set[str]) -> int:
-    for index, row in enumerate(rows[:25]):
-        if sum(_header(cell) in recognised for cell in row) >= 2:
-            return index
-    raise StatementParseError(
-        "Could not find statement columns. Include a date, description, and amount or debit/credit columns."
-    )
-
-
-def _column_index(headers: list[str], accepted: tuple[str, ...], required: bool = False):
-    for accepted_name in accepted:
-        if accepted_name in headers:
-            return headers.index(accepted_name)
     if required:
-        raise StatementParseError(f"Missing required column: one of {', '.join(accepted)}")
+        raise StatementParseError(
+            f"Missing required column. Expected one of: {', '.join(accepted)}"
+        )
+
     return None
 
 
 def _cell(row: list[object], index: int | None) -> object:
-    return row[index] if index is not None and index < len(row) else ""
+    if index is None or index >= len(row):
+        return ""
+    return row[index]
+
+
+def _find_header_row(rows: list[list[object]]) -> int:
+    for index, row in enumerate(rows[:25]):
+        headers = {_header(cell) for cell in row}
+        has_date = bool(headers.intersection(DATE_HEADERS))
+        has_description = bool(headers.intersection(DESCRIPTION_HEADERS))
+        has_balance = bool(headers.intersection(BALANCE_HEADERS))
+        has_movement = bool(
+            headers.intersection(DEBIT_HEADERS + CREDIT_HEADERS + AMOUNT_HEADERS)
+        )
+
+        if has_date and has_description and has_balance and has_movement:
+            return index
+
+    raise StatementParseError(
+        "Could not identify a supported Standard Bank statement header. "
+        "Expected date, description, balance and debit/credit or amount columns."
+    )
 
 
 def _parse_amount(value: object) -> Decimal | None:
     if value is None:
         return None
+
+    if isinstance(value, Decimal):
+        return value.quantize(Decimal("0.01"))
+
     raw = str(value).strip()
     if not raw or raw in {"-", "--"}:
         return None
-    negative = raw.startswith("(") and raw.endswith(")")
-    cleaned = re.sub(r"[^0-9,.-]", "", raw).replace(",", "")
+
+    parentheses_negative = raw.startswith("(") and raw.endswith(")")
+    cleaned = re.sub(r"[^0-9,.\-]", "", raw)
+
+    if not cleaned:
+        return None
+
+    if cleaned.count("-") > 1 or ("-" in cleaned and not cleaned.startswith("-")):
+        raise StatementParseError(f"Invalid amount: {raw!r}")
+
+    if "," in cleaned and "." in cleaned:
+        cleaned = cleaned.replace(",", "")
+    elif "," in cleaned:
+        if re.fullmatch(r"-?\d{1,3}(,\d{3})+", cleaned):
+            cleaned = cleaned.replace(",", "")
+        else:
+            cleaned = cleaned.replace(",", ".")
+
+    if cleaned.count(".") > 1:
+        raise StatementParseError(f"Invalid amount: {raw!r}")
+
     try:
         result = Decimal(cleaned)
     except InvalidOperation as exc:
         raise StatementParseError(f"Invalid amount: {raw!r}") from exc
-    return -abs(result) if negative else result
+
+    if parentheses_negative:
+        result = -abs(result)
+
+    return result.quantize(Decimal("0.01"))
 
 
-def _parse_date(value: object) -> date:
+def _excel_serial_to_date(value: float, datemode: int) -> date:
+    # Excel's 1900 date system contains the historical fake 1900-02-29 day.
+    base = datetime(1899, 12, 30) if datemode == 0 else datetime(1904, 1, 1)
+    return (base + timedelta(days=float(value))).date()
+
+
+def _parse_date(value: object, *, excel_datemode: int = 0) -> date:
+    if isinstance(value, datetime):
+        return value.date()
+
+    if isinstance(value, date):
+        return value
+
     if isinstance(value, (int, float)) and value > 0:
-        return xlrd.xldate_as_datetime(value, 0).date()
+        return _excel_serial_to_date(float(value), excel_datemode)
+
     raw = str(value).strip()
     for fmt in (
         "%d/%m/%Y",
@@ -116,81 +167,194 @@ def _parse_date(value: object) -> date:
         try:
             return datetime.strptime(raw, fmt).date()
         except ValueError:
-            pass
+            continue
+
     raise StatementParseError(f"Invalid transaction date: {raw!r}")
 
 
-def parse_rows(rows: list[list[object]], bank: str | None = None) -> list[RawTransaction]:
-    date_headers = _profile_headers(bank, "date", DATE_HEADERS)
-    description_headers = _profile_headers(bank, "description", DESCRIPTION_HEADERS)
-    debit_headers = _profile_headers(bank, "debit", DEBIT_HEADERS)
-    credit_headers = _profile_headers(bank, "credit", CREDIT_HEADERS)
-    amount_headers = _profile_headers(bank, "amount", AMOUNT_HEADERS)
-    recognised = set(date_headers + description_headers + debit_headers + credit_headers + amount_headers)
-    header_row = _find_header_row(rows, recognised)
+def parse_rows(
+    rows: list[list[object]],
+    *,
+    excel_datemode: int = 0,
+) -> ParsedStatement:
+    header_row = _find_header_row(rows)
     headers = [_header(cell) for cell in rows[header_row]]
-    date_col = _column_index(headers, date_headers, required=True)
-    description_col = _column_index(headers, description_headers, required=True)
-    debit_col = _column_index(headers, debit_headers)
-    credit_col = _column_index(headers, credit_headers)
-    amount_col = _column_index(headers, amount_headers)
-    if amount_col is None and debit_col is None and credit_col is None:
-        raise StatementParseError("Missing amount, debit, or credit column.")
 
-    transactions = []
-    for row in rows[header_row + 1 :]:
-        if not any(str(cell).strip() for cell in row):
+    date_col = _column_index(headers, DATE_HEADERS, required=True)
+    description_col = _column_index(headers, DESCRIPTION_HEADERS, required=True)
+    debit_col = _column_index(headers, DEBIT_HEADERS)
+    credit_col = _column_index(headers, CREDIT_HEADERS)
+    amount_col = _column_index(headers, AMOUNT_HEADERS)
+    balance_col = _column_index(headers, BALANCE_HEADERS, required=True)
+    reference_col = _column_index(headers, REFERENCE_HEADERS)
+
+    if debit_col is None and credit_col is None and amount_col is None:
+        raise StatementParseError(
+            "Standard Bank statement has no debit, credit, or signed amount column."
+        )
+
+    transactions: list[RawTransaction] = []
+    explicit_opening_balance: Decimal | None = None
+    explicit_closing_balance: Decimal | None = None
+
+    for row_index, row in enumerate(rows[header_row + 1 :], start=header_row + 2):
+        if not any(str(cell or "").strip() for cell in row):
             continue
+
         description = str(_cell(row, description_col)).strip()
         if not description:
             continue
-        try:
-            txn_date = _parse_date(_cell(row, date_col))
-            debit = _parse_amount(_cell(row, debit_col))
-            credit = _parse_amount(_cell(row, credit_col))
-            amount = _parse_amount(_cell(row, amount_col))
-        except StatementParseError:
-            # Bank exports often contain totals/footer rows. A malformed row
-            # without a description has already been ignored; surfaced rows
-            # with a description must be fixed rather than silently imported.
-            raise
 
-        if debit is not None and debit != 0:
-            direction, amount = "debit", abs(debit)
-        elif credit is not None and credit != 0:
-            direction, amount = "credit", abs(credit)
-        elif amount is not None and amount != 0:
-            direction, amount = ("debit", abs(amount)) if amount < 0 else ("credit", amount)
-        else:
+        debit = _parse_amount(_cell(row, debit_col))
+        credit = _parse_amount(_cell(row, credit_col))
+        signed_amount = _parse_amount(_cell(row, amount_col))
+        balance = _parse_amount(_cell(row, balance_col))
+
+        description_lower = description.lower()
+        no_movement = all(
+            value is None or value == 0 for value in (debit, credit, signed_amount)
+        )
+
+        if "opening balance" in description_lower and balance is not None and no_movement:
+            explicit_opening_balance = balance
             continue
-        transactions.append(RawTransaction(txn_date, description, amount.quantize(Decimal("0.01")), direction))
+
+        if "closing balance" in description_lower and balance is not None and no_movement:
+            explicit_closing_balance = balance
+            continue
+
+        debit_present = debit is not None and debit != 0
+        credit_present = credit is not None and credit != 0
+
+        if debit_present and credit_present:
+            raise StatementParseError(
+                f"Row {row_index} contains both a debit and credit. Import cancelled."
+            )
+
+        if debit_present and debit < 0:
+            raise StatementParseError(
+                f"Row {row_index} contains a negative debit. "
+                "This reversal needs manual investigation."
+            )
+
+        if credit_present and credit < 0:
+            raise StatementParseError(
+                f"Row {row_index} contains a negative credit. "
+                "This reversal needs manual investigation."
+            )
+
+        if debit_present:
+            direction = "debit"
+            amount = debit
+        elif credit_present:
+            direction = "credit"
+            amount = credit
+        elif signed_amount is not None and signed_amount != 0:
+            if signed_amount < 0:
+                direction = "debit"
+                amount = abs(signed_amount)
+            else:
+                direction = "credit"
+                amount = signed_amount
+        else:
+            # Footer/summary rows with no movement are ignored.
+            continue
+
+        if balance is None:
+            raise StatementParseError(
+                f"Row {row_index} contains a transaction but has no running balance."
+            )
+
+        txn_date = _parse_date(_cell(row, date_col), excel_datemode=excel_datemode)
+        reference_raw = str(_cell(row, reference_col)).strip()
+
+        transactions.append(
+            RawTransaction(
+                source_row=row_index,
+                txn_date=txn_date,
+                description=description,
+                amount=amount.quantize(Decimal("0.01")),
+                direction=direction,
+                balance_after=balance.quantize(Decimal("0.01")),
+                reference=reference_raw or None,
+            )
+        )
+
     if not transactions:
-        raise StatementParseError("No transactions found in the uploaded statement.")
-    return transactions
+        raise StatementParseError(
+            "No transactions were found in the Standard Bank statement."
+        )
+
+    return ParsedStatement(
+        transactions=transactions,
+        explicit_opening_balance=explicit_opening_balance,
+        explicit_closing_balance=explicit_closing_balance,
+    )
 
 
-def parse_statement(filename: str, content: bytes, bank: str | None = None) -> list[RawTransaction]:
+def parse_statement(
+    filename: str,
+    content: bytes,
+    bank: str | None = None,
+) -> ParsedStatement:
+    normalized_bank = (bank or "Standard Bank").strip().lower()
+    if normalized_bank not in {"standard bank", "standard"}:
+        raise StatementParseError(
+            "This prototype currently supports Standard Bank only."
+        )
+
     extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    excel_datemode = 0
+
     if extension == "csv":
         try:
             text = content.decode("utf-8-sig")
         except UnicodeDecodeError:
             text = content.decode("latin-1")
+
         try:
             dialect = csv.Sniffer().sniff(text[:4096], delimiters=",;\t")
         except csv.Error:
             dialect = csv.excel
+
         rows = list(csv.reader(io.StringIO(text), dialect=dialect))
+
+    elif extension == "xlsx":
+        try:
+            workbook = load_workbook(
+                io.BytesIO(content),
+                read_only=True,
+                data_only=True,
+            )
+        except Exception as exc:
+            raise StatementParseError("Could not read the XLSX statement.") from exc
+
+        try:
+            sheet = workbook.active
+            rows = [list(row) for row in sheet.iter_rows(values_only=True)]
+        finally:
+            workbook.close()
+
     elif extension == "xls":
-        book = xlrd.open_workbook(file_contents=content)
+        try:
+            import xlrd
+        except ImportError as exc:
+            raise StatementParseError(
+                "Legacy XLS support requires xlrd. Install requirements.txt first."
+            ) from exc
+
+        try:
+            book = xlrd.open_workbook(file_contents=content)
+        except Exception as exc:
+            raise StatementParseError("Could not read the XLS statement.") from exc
+
+        excel_datemode = book.datemode
         sheet = book.sheet_by_index(0)
         rows = [sheet.row_values(index) for index in range(sheet.nrows)]
-    elif extension == "xlsx":
-        workbook = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
-        sheet = workbook.active
-        rows = [list(row) for row in sheet.iter_rows(values_only=True)]
-    elif extension == "pdf":
-        raise StatementParseError("PDF uploads need a bank-specific parser. Export the statement as CSV or XLSX first.")
+
     else:
-        raise StatementParseError("Upload a CSV or .xls bank statement.")
-    return parse_rows(rows, bank=bank)
+        raise StatementParseError(
+            "Upload a Standard Bank CSV, XLS, or XLSX statement."
+        )
+
+    return parse_rows(rows, excel_datemode=excel_datemode)

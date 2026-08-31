@@ -1,45 +1,245 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Bursar Cashbook Review</title>
   <style>
-    body { font-family: system-ui, sans-serif; max-width: 1100px; margin: 2rem auto; padding: 0 1rem; color: #172033; }
-    h1 { margin-bottom: .2rem; } form, table { width: 100%; } form { padding: 1rem; background: #f1f5f9; display: flex; gap: .75rem; flex-wrap: wrap; align-items: end; }
-    label { display: grid; gap: .3rem; } button, .button { background: #0f766e; color: white; border: 0; border-radius: .3rem; padding: .6rem .9rem; cursor: pointer; text-decoration: none; }
-    table { border-collapse: collapse; margin-top: 1.5rem; } th, td { border-bottom: 1px solid #dbe3ed; text-align: left; padding: .65rem .45rem; vertical-align: top; }
-    select { min-width: 220px; } #message { min-height: 1.5rem; } .muted { color: #64748b; }
+    :root { font-family: system-ui, sans-serif; color: #172033; background: #f8fafc; }
+    body { max-width: 1180px; margin: 2rem auto; padding: 0 1rem 3rem; }
+    h1 { margin-bottom: .2rem; }
+    h2 { margin-top: 2rem; }
+    .muted { color: #64748b; }
+    .panel { background: white; border: 1px solid #dbe3ed; border-radius: .5rem; padding: 1rem; margin-top: 1rem; }
+    form { display: flex; gap: .75rem; flex-wrap: wrap; align-items: end; }
+    label { display: grid; gap: .3rem; }
+    button, .button { background: #0f766e; color: white; border: 0; border-radius: .3rem; padding: .65rem .9rem; cursor: pointer; text-decoration: none; font: inherit; }
+    button:disabled { opacity: .55; cursor: not-allowed; }
+    input, select { min-height: 2.25rem; padding: 0 .45rem; border: 1px solid #cbd5e1; border-radius: .3rem; background: white; }
+    select { min-width: 220px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 1rem; background: white; }
+    th, td { border-bottom: 1px solid #dbe3ed; text-align: left; padding: .65rem .45rem; vertical-align: top; }
+    th { background: #f1f5f9; }
+    #message { min-height: 1.5rem; font-weight: 600; }
+    #reconciliation { white-space: pre-line; }
+    .money-out { color: #991b1b; }
+    .money-in { color: #166534; }
+    @media (max-width: 760px) {
+      table { display: block; overflow-x: auto; }
+      .button, button { width: 100%; text-align: center; }
+    }
   </style>
 </head>
 <body>
-  <h1>Cashbook review</h1><p class="muted">Upload a bank export, then approve or correct each suggested category.</p>
-  <form id="upload-form"><label>Bank <select name="bank"><option value="">Generic CSV</option><option>FNB</option><option>ABSA</option><option selected>Standard Bank</option><option>Nedbank</option><option>Capitec</option></select></label><label>Statement <input name="file" type="file" accept=".csv,.xls,.xlsx" required></label><button>Upload statement</button></form>
-  <form id="category-form"><label>New category <input name="name" placeholder="e.g. School transport" required></label><label>Type <select name="type"><option value="expense">Expense</option><option value="income">Income</option></select></label><button>Add category</button><a class="button" href="/exports/reviewed-cashbook.xlsx">Download reviewed cashbook</a><a class="button" href="/exports/wced-cashbook.xls">Download WCED cashbook</a></form>
-  <p id="message"></p><table><thead><tr><th>Date</th><th>Description</th><th>Amount</th><th>Suggested category</th><th>Approve / correct</th></tr></thead><tbody id="rows"></tbody></table>
+  <h1>Bursar Cashbook Review</h1>
+  <p class="muted">Standard Bank prototype. Every imported transaction requires bursar review before export.</p>
+
+  <section class="panel">
+    <h2>1. Import statement</h2>
+    <form id="upload-form">
+      <label>
+        Bank
+        <select name="bank">
+          <option selected>Standard Bank</option>
+        </select>
+      </label>
+      <label>
+        Statement
+        <input name="file" type="file" accept=".csv,.xls,.xlsx" required>
+      </label>
+      <button type="submit">Upload statement</button>
+    </form>
+    <p id="reconciliation" class="muted"></p>
+  </section>
+
+  <section class="panel">
+    <h2>2. Categories</h2>
+    <form id="category-form">
+      <label>
+        New category
+        <input name="name" placeholder="e.g. LTSM: Stationery" required>
+      </label>
+      <label>
+        Type
+        <select name="type">
+          <option value="expense">Expense</option>
+          <option value="income">Income</option>
+        </select>
+      </label>
+      <button type="submit">Add category</button>
+    </form>
+  </section>
+
+  <section class="panel">
+    <h2>3. Export</h2>
+    <form id="export-form" onsubmit="return false">
+      <label>
+        Financial year
+        <input id="export-year" type="number" min="2000" max="2100" required>
+      </label>
+      <a id="reviewed-export" class="button" href="#">Download reviewed cashbook</a>
+      <a id="wced-export" class="button" href="#">Download WCED cashbook</a>
+    </form>
+    <p class="muted">Exports are blocked while any transaction in that year is still pending review.</p>
+  </section>
+
+  <p id="message"></p>
+
+  <h2>Pending review</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Date</th>
+        <th>Description</th>
+        <th>Reference</th>
+        <th>Amount</th>
+        <th>Balance</th>
+        <th>Suggestion</th>
+        <th>Approve / correct</th>
+      </tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+
   <script>
     let categories = [];
     const message = document.querySelector('#message');
-    const escapeHtml = value => String(value).replace(/[&<>'"]/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
+    const reconciliation = document.querySelector('#reconciliation');
+    const yearInput = document.querySelector('#export-year');
+    const reviewedExport = document.querySelector('#reviewed-export');
+    const wcedExport = document.querySelector('#wced-export');
+
+    const escapeHtml = value => String(value ?? '').replace(/[&<>'"]/g, char => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
+    }[char]));
+
+    function updateExportLinks() {
+      const year = Number(yearInput.value);
+      reviewedExport.href = `/exports/reviewed-cashbook.xlsx?year=${year}`;
+      wcedExport.href = `/exports/wced-cashbook.xls?year=${year}`;
+    }
+
     async function load() {
-      categories = await (await fetch('/categories')).json();
-      const transactions = await (await fetch('/transactions/pending')).json();
-      document.querySelector('#rows').innerHTML = transactions.map(t => {
-        const blank = `<option value="" ${t.suggested_category_id ? '' : 'selected'} disabled>Select category</option>`;
-        const options = categories.map(c => `<option value="${c.id}" ${c.id === t.suggested_category_id ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('');
-        const suggestion = t.suggested_category ? `${escapeHtml(t.suggested_category)} (${Math.round(t.confidence * 100)}%)` : 'No suggestion';
-        return `<tr><td>${t.date}</td><td>${escapeHtml(t.description)}</td><td>${t.direction === 'debit' ? '-' : '+'} R${t.amount}</td><td>${suggestion}</td><td><select id="category-${t.id}">${blank}${options}</select> <button onclick="review(${t.id})">Save</button></td></tr>`;
-      }).join('') || '<tr><td colspan="5">Nothing waiting for review.</td></tr>';
+      const [categoryResponse, transactionResponse] = await Promise.all([
+        fetch('/categories'),
+        fetch('/transactions/pending')
+      ]);
+
+      categories = await categoryResponse.json();
+      const transactions = await transactionResponse.json();
+
+      document.querySelector('#rows').innerHTML = transactions.map(transaction => {
+        const requiredType = transaction.direction === 'debit' ? 'expense' : 'income';
+        const validCategories = categories.filter(category => category.type === requiredType);
+        const blankSelected = transaction.suggested_category_id ? '' : 'selected';
+        const blank = `<option value="" ${blankSelected} disabled>Select category</option>`;
+        const options = validCategories.map(category => (
+          `<option value="${category.id}" ${category.id === transaction.suggested_category_id ? 'selected' : ''}>${escapeHtml(category.name)}</option>`
+        )).join('');
+
+        const suggestion = transaction.suggested_category
+          ? `${escapeHtml(transaction.suggested_category)} (${Math.round(transaction.confidence * 100)}%)`
+          : 'No suggestion';
+
+        const sign = transaction.direction === 'debit' ? '-' : '+';
+        const amountClass = transaction.direction === 'debit' ? 'money-out' : 'money-in';
+
+        return `<tr>
+          <td>${escapeHtml(transaction.date)}</td>
+          <td>${escapeHtml(transaction.description)}</td>
+          <td>${escapeHtml(transaction.reference || '')}</td>
+          <td class="${amountClass}">${sign} R${escapeHtml(transaction.amount)}</td>
+          <td>R${escapeHtml(transaction.balance_after)}</td>
+          <td>${suggestion}</td>
+          <td>
+            <select id="category-${transaction.id}">${blank}${options}</select>
+            <button type="button" onclick="review(${transaction.id})">Save</button>
+          </td>
+        </tr>`;
+      }).join('') || '<tr><td colspan="7">Nothing waiting for review.</td></tr>';
     }
+
     async function review(id) {
-      const category_id = Number(document.querySelector(`#category-${id}`).value);
-      if (!category_id) { message.textContent = 'Select a category before saving.'; return; }
-      const response = await fetch(`/transactions/${id}/review`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({category_id, learn:true})});
-      if (!response.ok) { message.textContent = (await response.json()).detail; return; }
-      message.textContent = 'Saved. Future matching transactions will use this correction.'; load();
+      const categoryId = Number(document.querySelector(`#category-${id}`).value);
+      if (!categoryId) {
+        message.textContent = 'Select a category before saving.';
+        return;
+      }
+
+      const response = await fetch(`/transactions/${id}/review`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({category_id: categoryId, learn: true})
+      });
+      const data = await response.json();
+
+      if (!response.ok) {
+        message.textContent = data.detail;
+        return;
+      }
+
+      message.textContent = data.idempotent
+        ? 'Already saved.'
+        : `Saved as ${data.status}.`;
+      await load();
     }
-    document.querySelector('#upload-form').addEventListener('submit', async event => { event.preventDefault(); const response = await fetch('/statements/upload', {method:'POST', body:new FormData(event.target)}); const data = await response.json(); message.textContent = response.ok ? `${data.transactions_imported} transactions imported; ${data.pending_review} need review.` : data.detail; if(response.ok) { event.target.reset(); load(); } });
-    document.querySelector('#category-form').addEventListener('submit', async event => { event.preventDefault(); const form = new FormData(event.target); const response = await fetch('/categories', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name: form.get('name'), type: form.get('type')})}); const data = await response.json(); message.textContent = response.ok ? `${data.name} added.` : data.detail; if(response.ok) { event.target.reset(); load(); } });
-    load();
+
+    document.querySelector('#upload-form').addEventListener('submit', async event => {
+      event.preventDefault();
+      message.textContent = 'Importing...';
+      reconciliation.textContent = '';
+
+      const response = await fetch('/statements/upload', {
+        method: 'POST',
+        body: new FormData(event.target)
+      });
+      const data = await response.json();
+
+      if (!response.ok) {
+        message.textContent = data.detail;
+        return;
+      }
+
+      message.textContent = `${data.transactions_imported} transaction(s) imported; ${data.duplicates_skipped} duplicate(s) skipped; ${data.pending_review} require review.`;
+      reconciliation.textContent = [
+        'Reconciliation: PASSED',
+        `Opening balance: R${data.reconciliation.opening_balance}`,
+        `Money in: R${data.reconciliation.total_credits}`,
+        `Money out: R${data.reconciliation.total_debits}`,
+        `Closing balance: R${data.reconciliation.closing_balance}`,
+        `Difference: R${data.reconciliation.difference}`
+      ].join('\n');
+
+      yearInput.value = Number(data.period.start.slice(0, 4));
+      updateExportLinks();
+      event.target.reset();
+      await load();
+    });
+
+    document.querySelector('#category-form').addEventListener('submit', async event => {
+      event.preventDefault();
+      const form = new FormData(event.target);
+      const response = await fetch('/categories', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name: form.get('name'), type: form.get('type')})
+      });
+      const data = await response.json();
+
+      message.textContent = response.ok ? `${data.name} added.` : data.detail;
+      if (response.ok) {
+        event.target.reset();
+        await load();
+      }
+    });
+
+    yearInput.value = new Date().getFullYear();
+    yearInput.addEventListener('input', updateExportLinks);
+    updateExportLinks();
+    load().catch(error => {
+      console.error(error);
+      message.textContent = 'Could not load the review screen.';
+    });
   </script>
 </body>
 </html>
