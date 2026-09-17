@@ -1,92 +1,87 @@
 # Bursar Cashbook Automation
 
-Single-bursar Standard Bank prototype for importing, reconciling, reviewing and exporting WCED cashbook transactions.
+Local Standard Bank prototype that reads bank statements and updates the bursar's existing Excel cashbook directly.
 
-## Prototype guarantees
+## Phase 6 workflow
 
-- Standard Bank CSV/XLS/XLSX only.
-- Debit/credit structure is validated before import.
-- Running balances must reconcile before import succeeds.
-- Existing transactions are fingerprinted and skipped on overlapping statement imports.
-- Trusted exact historical matches are auto-approved; only uncertain transactions require review.
-- Exports are financial-year scoped and blocked while that year has pending transactions.
-- Review retries are idempotent and category corrections move, rather than duplicate, classifier learning votes.
+```text
+Standard Bank statement
+        ↓
+Parse transactions
+        ↓
+Validate debit / credit structure
+        ↓
+Reconcile running balances
+        ↓
+Deduplicate
+        ↓
+Classify
+        ↓
+Trusted exact match ──→ auto-approved
+Uncertain match       ──→ bursar review
+        ↓
+Live cashbook sync
+        ↓
+Existing registered .xls workbook is updated in place
+```
 
-## Supportability
+There is no generated/downloaded cashbook in Phase 6.
 
-Phase 2 adds local support tooling without adding multi-user production infrastructure:
+## Financial safety
 
-- JSON application logs in `logs/cashbook.log` with rotation.
-- Append-only application audit events stored in SQLite.
-- Import history and audit history visible in the review screen.
-- Unexpected failures return support-friendly IDs such as `ERR-20260831-A1B2C3D4`.
-- `Download diagnostic report` creates a privacy-reduced ZIP containing app/system metadata, recent import summaries, audit history and the application log tail.
-- Automatic SQLite backups are created at startup (once per day) and immediately before statement imports. The newest 10 are retained by default.
-- App version is shown in the UI and `/health` response.
+- Standard Bank statement validation and running-balance reconciliation.
+- Transaction fingerprinting prevents overlapping imports from duplicating bank transactions.
+- Trusted automatic classification requires an exact normalized match, at least 95% confidence and at least 3 historical hits.
+- Human review handles uncertain classifications.
+- `cashbook_syncs` records the exact workbook sheet, row and category column used for each synchronized transaction.
+- Retrying synchronization does not append a transaction twice.
+- Correcting a synchronized classification updates the existing row instead of adding another row.
+- The current workbook is backed up before every live write.
+- Modified workbook bytes are reopened and validated before replacing the live file.
+- If Excel locks the workbook, the accounting decision stays saved and the write can be retried safely.
 
-Diagnostics intentionally exclude full transaction descriptions, bank references and complete statement data. Application logs should likewise log IDs/counts rather than transaction descriptions.
+## Cashbook structure
 
-## Install
+The first live adapter is `monthly_pc_rc_v1`. It supports the WCED-style monthly PC/RC workbook family while discovering category names and columns from the bursar's actual workbook.
+
+This is deliberately adapter-based: a genuinely different cashbook family should be added as another cashbook adapter rather than changing statement parsing or classification logic.
+
+## Handover
+
+First time:
 
 ```powershell
-pip install -r requirements.txt
-python seed.py data/2020_cashbook.xls
+SETUP CASHBOOK.bat
+```
+
+Normal use:
+
+```powershell
+START CASHBOOK.bat
+```
+
+Then:
+
+1. Register the bursar's existing `.xls` cashbook in the browser.
+2. Import a Standard Bank statement.
+3. Review only exceptions.
+4. Use **Open cashbook in Excel** to inspect the live file.
+
+## Tests
+
+```powershell
 python -m unittest discover -s tests -v
 ```
 
-Set the blank WCED template:
+The XLS integration tests use `data/2020_cashbook.xls` when the fixture and legacy XLS dependencies are available.
 
-```powershell
-$env:WCED_TEMPLATE_PATH = "C:\path\to\blank-WCED-cashbook.xls"
-```
+## Upgrade from Phase 5
 
-Start the prototype:
+Do **not** delete `cashbook.db` and do **not** reseed. Starting Phase 6 creates two new tables via SQLAlchemy `create_all()`:
 
-```powershell
-uvicorn app.main:app --reload
-```
+- `cashbook_profiles`
+- `cashbook_syncs`
 
-Open `http://127.0.0.1:8000/`.
+Existing categories, rules, statements, transactions, audit history and backups remain intact.
 
-## Phase 2 upgrade note
-
-If you already applied Phase 1, **do not delete or recreate `cashbook.db`**. Starting the app after this patch adds the new `audit_events` table with `create_all()` while preserving the existing categories, rules, statements and transactions.
-
-## Local support configuration
-
-Optional environment variables:
-
-```powershell
-$env:CASHBOOK_LOG_DIR = "logs"
-$env:CASHBOOK_BACKUP_DIR = "backups"
-$env:CASHBOOK_BACKUP_RETENTION = "10"
-```
-
-## Phase 3 pilot handover
-
-This build includes a local setup wizard, Windows setup/start scripts, export preflight confirmation, backup/restore controls, a Help page, support documentation, and the pilot checklist.
-
-For a Windows handover:
-
-1. Run `SETUP CASHBOOK.bat` once if `.venv` has not been created.
-2. Run `START CASHBOOK.bat` for normal use.
-3. Open **Setup** and ensure all readiness checks are green.
-4. Upload the blank WCED `.xls` template through Setup if it is not already configured.
-
-The local template is stored at `config/wced-template.xls` and is ignored by Git.
-
-Do not delete `cashbook.db` when applying Phase 3 over the tested Phase 2 prototype.
-
-
-## Phase 5 actual automation
-
-Phase 5 keeps the local single-bursar handover model and automates the actual statement-to-cashbook workflow:
-
-- Exact expense matches auto-approve only at >=95% historical confidence and >=3 prior hits.
-- Fuzzy matches and new descriptions remain manual exceptions; income becomes eligible after consistent learned history exists.
-- `/cashbook/preview` exposes the target monthly PC/RC sheet, category allocation, automation status and reconciliation context for every transaction.
-- Automatic allocations remain editable before export.
-- The WCED `.xls` is generated from the configured real blank template.
-- The generated workbook is reopened and every intended date, amount and category cell is validated before download.
-
-No database reset or reseed is required when applying Phase 5 over Phase 3.
+After applying the patch, register the actual current cashbook. Existing approved/corrected transactions can then be synchronized into it once.

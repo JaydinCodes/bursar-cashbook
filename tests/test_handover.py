@@ -9,7 +9,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app import backups, config
+from app import backups
 from app.main import app, get_db
 from app.models import Base, Category, Statement, Transaction
 from app.version import APP_VERSION
@@ -45,23 +45,16 @@ class HandoverApiTests(unittest.TestCase):
         self.assertIn("Bursar Cashbook Help", response.text)
 
     def test_version_bumped_for_handover(self):
-        self.assertEqual(APP_VERSION, "0.5.0")
+        self.assertEqual(APP_VERSION, "0.6.0")
 
-    def test_setup_status_reports_missing_categories_and_template(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            with patch.object(config, "CONFIG_DIR", root / "config"), patch.object(
-                config, "DEFAULT_WCED_TEMPLATE", root / "config" / "wced-template.xls"
-            ), patch("app.main.CONFIG_DIR", root / "config"), patch(
-                "app.main.DEFAULT_WCED_TEMPLATE", root / "config" / "wced-template.xls"
-            ):
-                response = self.client.get("/setup/status")
-
+    def test_setup_status_reports_missing_categories_and_live_cashbook(self):
+        response = self.client.get("/setup/status")
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertFalse(data["ready_for_import"])
-        self.assertFalse(data["ready_for_wced_export"])
+        self.assertFalse(data["ready_for_live_sync"])
         self.assertEqual(data["category_count"], 0)
+        self.assertFalse(data["cashbook"]["registered"])
 
     def test_setup_status_becomes_import_ready_when_categories_exist(self):
         db = self.session_factory()
@@ -69,20 +62,13 @@ class HandoverApiTests(unittest.TestCase):
         db.commit()
         db.close()
 
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            with patch.object(config, "CONFIG_DIR", root / "config"), patch.object(
-                config, "DEFAULT_WCED_TEMPLATE", root / "config" / "wced-template.xls"
-            ), patch("app.main.CONFIG_DIR", root / "config"), patch(
-                "app.main.DEFAULT_WCED_TEMPLATE", root / "config" / "wced-template.xls"
-            ):
-                response = self.client.get("/setup/status")
-
+        response = self.client.get("/setup/status")
         data = response.json()
         self.assertTrue(data["ready_for_import"])
-        self.assertFalse(data["ready_for_wced_export"])
+        self.assertFalse(data["ready_for_live_sync"])
+        self.assertFalse(data["cashbook"]["registered"])
 
-    def test_export_summary_blocks_pending_and_allows_reviewed(self):
+    def test_cashbook_summary_tracks_review_readiness(self):
         db = self.session_factory()
         category = Category(name="Stationery", type="expense")
         db.add(category)
@@ -121,15 +107,15 @@ class HandoverApiTests(unittest.TestCase):
         db.add(transaction)
         db.commit()
 
-        pending = self.client.get("/exports/summary?year=2026").json()
-        self.assertFalse(pending["ready_for_reviewed_export"])
+        pending = self.client.get("/cashbook/summary?year=2026").json()
+        self.assertFalse(pending["ready"])
         self.assertEqual(pending["pending"], 1)
 
         transaction.status = "corrected"
         transaction.category_id = category.id
         db.commit()
-        reviewed = self.client.get("/exports/summary?year=2026").json()
-        self.assertTrue(reviewed["ready_for_reviewed_export"])
+        reviewed = self.client.get("/cashbook/summary?year=2026").json()
+        self.assertTrue(reviewed["ready"])
         self.assertEqual(reviewed["money_out"], "100.00")
         db.close()
 

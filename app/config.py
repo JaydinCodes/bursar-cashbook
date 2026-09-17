@@ -3,6 +3,15 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_DIR = Path(os.getenv("CASHBOOK_CONFIG_DIR", PROJECT_ROOT / "config"))
+CASHBOOK_DIR = Path(os.getenv("CASHBOOK_LIVE_DIR", PROJECT_ROOT / "cashbooks"))
+CASHBOOK_BACKUP_DIR = Path(
+    os.getenv("CASHBOOK_FILE_BACKUP_DIR", PROJECT_ROOT / "cashbook_backups")
+)
+DEFAULT_ACTIVE_CASHBOOK = CASHBOOK_DIR / "active-cashbook.xls"
+
+# Kept only so older installations fail gracefully instead of losing the
+# previously configured file. Phase 6 no longer generates a workbook from a
+# blank template; the registered live cashbook is the destination itself.
 DEFAULT_WCED_TEMPLATE = CONFIG_DIR / "wced-template.xls"
 
 
@@ -10,7 +19,6 @@ def get_wced_template_path() -> Path | None:
     configured = os.getenv("WCED_TEMPLATE_PATH")
     if configured:
         return Path(configured).expanduser().resolve()
-
     return DEFAULT_WCED_TEMPLATE if DEFAULT_WCED_TEMPLATE.is_file() else None
 
 

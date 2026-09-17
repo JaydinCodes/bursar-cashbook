@@ -1,0 +1,588 @@
+"""Live cashbook registration and in-place synchronization.
+
+The registered workbook is the accounting destination. Approved transactions
+are written into that same file; the application does not generate a separate
+cashbook for download.
+"""
+
+from __future__ import annotations
+
+from dataclasses import asdict
+from datetime import datetime
+from decimal import Decimal
+from hashlib import sha256
+import json
+from pathlib import Path
+import shutil
+
+from sqlalchemy.orm import Session
+
+from .config import CASHBOOK_BACKUP_DIR, DEFAULT_ACTIVE_CASHBOOK
+from .models import CashbookProfile, CashbookSync, Category, Transaction
+from .wced_export import (
+    WcedExportError,
+    WcedPlacement,
+    cashbook_target_sheet,
+    pc_column_categories,
+    rc_column_categories,
+    validate_wced_cashbook,
+)
+
+ADAPTER_NAME = "monthly_pc_rc_v1"
+FINAL_STATUSES = ("approved", "corrected")
+CASHBOOK_BACKUP_RETENTION = 20
+
+
+class CashbookSyncError(ValueError):
+    pass
+
+
+def _require_xls_dependencies():
+    try:
+        import xlrd
+        from xlutils.copy import copy as copy_workbook
+    except ImportError as exc:
+        raise CashbookSyncError(
+            "Live cashbook synchronization requires xlrd and xlutils. "
+            "Install requirements.txt first."
+        ) from exc
+    return xlrd, copy_workbook
+
+
+def _first_empty_row(sheet, start_row: int, columns: tuple[int, ...]) -> int:
+    for row in range(start_row, sheet.nrows):
+        first_cell = str(sheet.cell_value(row, 0)).strip().lower()
+        if first_cell.startswith("total "):
+            break
+        if all(
+            not str(sheet.cell_value(row, column)).strip()
+            or sheet.cell_value(row, column) == 0
+            for column in columns
+        ):
+            return row
+    raise CashbookSyncError(f"No empty capture rows remain in {sheet.name}.")
+
+
+def inspect_cashbook(content: bytes) -> dict:
+    """Parse and validate the supported cashbook structure.
+
+    Phase 6 supports the existing monthly PC/RC workbook family. Category
+    columns are discovered from each workbook rather than hard-coded, allowing
+    bursars to have different category layouts within that family. Additional
+    workbook families can be added later as adapters.
+    """
+    xlrd, _ = _require_xls_dependencies()
+    try:
+        workbook = xlrd.open_workbook(file_contents=content, formatting_info=True)
+    except Exception as exc:
+        raise CashbookSyncError("The selected cashbook is not a readable legacy .xls workbook.") from exc
+
+    month_names = (
+        "Jan", "Feb", "Mar", "April", "May", "June",
+        "July", "Aug", "Sept", "Oct", "Nov", "Dec",
+    )
+    required = {f"{month} {suffix}" for month in month_names for suffix in ("PC", "RC")}
+    missing = sorted(required.difference(workbook.sheet_names()))
+    if missing:
+        raise CashbookSyncError(
+            "This cashbook layout is not supported by the current adapter. "
+            f"Missing sheet(s): {', '.join(missing[:6])}"
+            + ("…" if len(missing) > 6 else "")
+        )
+
+    sheets: dict[str, dict] = {}
+    payment_categories: set[str] = set()
+    receipt_categories: set[str] = set()
+
+    for sheet_name in sorted(required):
+        sheet = workbook.sheet_by_name(sheet_name)
+        if sheet_name.endswith(" PC"):
+            categories = {
+                name: column for column, name in pc_column_categories(sheet).items()
+            }
+            payment_categories.update(categories)
+            start_row = 6
+        else:
+            categories = rc_column_categories(sheet)
+            receipt_categories.update(categories)
+            start_row = 7
+
+        if not categories:
+            raise CashbookSyncError(
+                f"Could not discover cashbook category columns in {sheet_name}."
+            )
+
+        sheets[sheet_name] = {
+            "start_row": start_row,
+            "category_count": len(categories),
+            "categories": categories,
+        }
+
+    return {
+        "adapter": ADAPTER_NAME,
+        "sheet_count": len(required),
+        "sheets": sheets,
+        "payment_categories": sorted(payment_categories),
+        "receipt_categories": sorted(receipt_categories),
+    }
+
+
+def get_active_cashbook(db: Session) -> CashbookProfile | None:
+    return (
+        db.query(CashbookProfile)
+        .filter(CashbookProfile.active.is_(True))
+        .order_by(CashbookProfile.id.desc())
+        .first()
+    )
+
+
+def register_cashbook(
+    db: Session,
+    *,
+    source_filename: str,
+    content: bytes,
+    replace: bool = False,
+) -> CashbookProfile:
+    layout = inspect_cashbook(content)
+    existing = get_active_cashbook(db)
+
+    if existing is not None:
+        if not replace:
+            raise CashbookSyncError(
+                "A live cashbook is already registered. Choose replace only before "
+                "transactions have been synchronized into it."
+            )
+        sync_count = (
+            db.query(CashbookSync)
+            .filter(CashbookSync.cashbook_profile_id == existing.id)
+            .count()
+        )
+        if sync_count:
+            raise CashbookSyncError(
+                "This cashbook already contains synchronized transactions. Replacing it "
+                "would break the audit trail. Keep using the registered cashbook or restore "
+                "a cashbook backup instead."
+            )
+        existing.active = False
+
+    DEFAULT_ACTIVE_CASHBOOK.parent.mkdir(parents=True, exist_ok=True)
+    temporary = DEFAULT_ACTIVE_CASHBOOK.with_suffix(".xls.tmp")
+    temporary.write_bytes(content)
+    temporary.replace(DEFAULT_ACTIVE_CASHBOOK)
+
+    profile = CashbookProfile(
+        name="Active cashbook",
+        adapter=layout["adapter"],
+        source_filename=source_filename,
+        file_path=str(DEFAULT_ACTIVE_CASHBOOK.resolve()),
+        file_hash=sha256(content).hexdigest(),
+        layout_json=json.dumps(layout, separators=(",", ":"), sort_keys=True),
+        active=True,
+    )
+    db.add(profile)
+    db.commit()
+    db.refresh(profile)
+    return profile
+
+
+def _cashbook_backup(path: Path, reason: str) -> Path:
+    CASHBOOK_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S-%f")
+    safe_reason = "".join(character if character.isalnum() or character == "-" else "-" for character in reason)
+    destination = CASHBOOK_BACKUP_DIR / f"cashbook-{timestamp}-{safe_reason}.xls"
+    shutil.copy2(path, destination)
+
+    backups = sorted(
+        CASHBOOK_BACKUP_DIR.glob("cashbook-*.xls"),
+        key=lambda item: item.stat().st_mtime,
+        reverse=True,
+    )
+    for stale in backups[CASHBOOK_BACKUP_RETENTION:]:
+        stale.unlink(missing_ok=True)
+    return destination
+
+
+def list_cashbook_backups() -> list[dict]:
+    CASHBOOK_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    result = []
+    for path in sorted(
+        CASHBOOK_BACKUP_DIR.glob("cashbook-*.xls"),
+        key=lambda item: item.stat().st_mtime,
+        reverse=True,
+    ):
+        stat = path.stat()
+        result.append(
+            {
+                "filename": path.name,
+                "size_bytes": stat.st_size,
+                "modified_at": datetime.fromtimestamp(stat.st_mtime).astimezone().isoformat(),
+            }
+        )
+    return result
+
+
+def _same_money(actual: object, expected: Decimal) -> bool:
+    try:
+        return abs(Decimal(str(actual)) - expected) <= Decimal("0.005")
+    except Exception:
+        return False
+
+
+def _validate_existing_synced_row(sheet, sync: CashbookSync, transaction: Transaction) -> None:
+    row = sync.row_index
+    if row >= sheet.nrows:
+        raise CashbookSyncError(
+            f"The cashbook row for transaction {transaction.id} no longer exists. "
+            "The workbook appears to have been structurally edited."
+        )
+    if sheet.cell_value(row, 0) != float(transaction.txn_date.day):
+        raise CashbookSyncError(
+            f"Transaction {transaction.id} moved in the cashbook. Automatic correction was stopped."
+        )
+    total_column = 3 if transaction.direction == "debit" else 4
+    if not _same_money(sheet.cell_value(row, total_column), transaction.amount):
+        raise CashbookSyncError(
+            f"Transaction {transaction.id} no longer matches its recorded cashbook row. "
+            "Automatic correction was stopped."
+        )
+
+
+def _category_columns(sheet, direction: str) -> dict[str, int]:
+    if direction == "debit":
+        return {name: column for column, name in pc_column_categories(sheet).items()}
+    return rc_column_categories(sheet)
+
+
+def _current_category(db: Session, transaction: Transaction) -> Category:
+    """Resolve the transaction's current category from its FK, not a cached relationship.
+
+    SessionLocal uses expire_on_commit=False, so transaction.category can remain
+    cached after category_id changes. Cashbook placement must always follow the
+    persisted/current foreign key.
+    """
+    if transaction.category_id is None:
+        raise CashbookSyncError(
+            f"Transaction {transaction.id} is final but has no cashbook category."
+        )
+
+    category = db.get(Category, transaction.category_id)
+    if category is None:
+        raise CashbookSyncError(
+            f"Transaction {transaction.id} references missing category "
+            f"{transaction.category_id}."
+        )
+    return category
+
+
+def _write_new_transaction(writable_sheet, row: int, transaction: Transaction) -> None:
+    amount = float(transaction.amount)
+    if transaction.direction == "debit":
+        writable_sheet.write(row, 0, transaction.txn_date.day)
+        writable_sheet.write(row, 2, transaction.payee_raw)
+        writable_sheet.write(row, 3, amount)
+    else:
+        writable_sheet.write(row, 0, transaction.txn_date.day)
+        writable_sheet.write(row, 3, f"IMPORT/{transaction.id}")
+        writable_sheet.write(row, 4, amount)
+
+
+def _eligible_transactions(db: Session, transaction_ids: list[int] | None) -> list[Transaction]:
+    query = (
+        db.query(Transaction)
+        .join(Transaction.category)
+        .filter(Transaction.status.in_(FINAL_STATUSES))
+    )
+    if transaction_ids is not None:
+        if not transaction_ids:
+            return []
+        query = query.filter(Transaction.id.in_(transaction_ids))
+    return query.order_by(Transaction.txn_date, Transaction.id).all()
+
+
+def sync_live_cashbook(
+    db: Session,
+    *,
+    transaction_ids: list[int] | None = None,
+) -> dict:
+    """Synchronize final classifications into the registered workbook in place.
+
+    New final transactions are appended once. If a previously synchronized
+    transaction is later corrected, its existing row is reallocated rather
+    than appended again.
+    """
+    profile = get_active_cashbook(db)
+    if profile is None:
+        return {
+            "status": "not_registered",
+            "message": "Register the bursar's live cashbook before synchronization.",
+            "written": 0,
+            "updated": 0,
+            "already_synced": 0,
+        }
+
+    xlrd, copy_workbook = _require_xls_dependencies()
+    path = Path(profile.file_path)
+    if not path.is_file():
+        raise CashbookSyncError(
+            "The registered cashbook file is missing. Restore it from a cashbook backup."
+        )
+
+    transactions = _eligible_transactions(db, transaction_ids)
+    if not transactions:
+        return {
+            "status": "up_to_date",
+            "message": "There are no approved transactions waiting for the cashbook.",
+            "written": 0,
+            "updated": 0,
+            "already_synced": 0,
+        }
+
+    try:
+        source = xlrd.open_workbook(str(path), formatting_info=True)
+    except Exception as exc:
+        raise CashbookSyncError("The registered cashbook could not be opened.") from exc
+
+    writable = copy_workbook(source)
+    sync_rows = {
+        row.transaction_id: row
+        for row in (
+            db.query(CashbookSync)
+            .filter(CashbookSync.cashbook_profile_id == profile.id)
+            .filter(CashbookSync.transaction_id.in_([item.id for item in transactions]))
+            .all()
+        )
+    }
+
+    next_rows: dict[str, int] = {}
+    placements: list[WcedPlacement] = []
+    new_syncs: list[tuple[Transaction, str, int, int]] = []
+    updated_syncs: list[tuple[CashbookSync, int]] = []
+    written = 0
+    updated = 0
+    already_synced = 0
+
+    for transaction in transactions:
+        category = _current_category(db, transaction)
+
+        sheet_name = cashbook_target_sheet(transaction.txn_date, transaction.direction)
+        try:
+            source_sheet = source.sheet_by_name(sheet_name)
+        except Exception as exc:
+            raise CashbookSyncError(f"The registered cashbook is missing {sheet_name}.") from exc
+
+        category_columns = _category_columns(source_sheet, transaction.direction)
+        category_column = category_columns.get(category.name)
+        if category_column is None:
+            raise CashbookSyncError(
+                f"Category {category.name!r} is not present in {sheet_name}. "
+                "Review the category mapping before syncing."
+            )
+
+        writable_sheet = writable.get_sheet(source.sheet_names().index(sheet_name))
+        existing = sync_rows.get(transaction.id)
+
+        if existing is not None:
+            if existing.sheet_name != sheet_name:
+                raise CashbookSyncError(
+                    f"Transaction {transaction.id} would move to another cashbook sheet. "
+                    "Automatic synchronization was stopped."
+                )
+            _validate_existing_synced_row(source_sheet, existing, transaction)
+            if existing.category_id == transaction.category_id:
+                already_synced += 1
+                continue
+
+            if existing.category_column != category_column:
+                writable_sheet.write(existing.row_index, existing.category_column, 0)
+            writable_sheet.write(existing.row_index, category_column, float(transaction.amount))
+            placements.append(
+                WcedPlacement(
+                    transaction_id=transaction.id,
+                    txn_date=transaction.txn_date,
+                    description=transaction.payee_raw,
+                    amount=transaction.amount,
+                    direction=transaction.direction,
+                    category_name=category.name,
+                    sheet_name=sheet_name,
+                    row=existing.row_index,
+                    category_column=category_column,
+                )
+            )
+            updated_syncs.append((existing, category_column))
+            updated += 1
+            continue
+
+        if sheet_name not in next_rows:
+            next_rows[sheet_name] = _first_empty_row(
+                source_sheet,
+                6 if transaction.direction == "debit" else 7,
+                (0, 2, 3) if transaction.direction == "debit" else (0, 3, 4),
+            )
+
+        row = next_rows[sheet_name]
+        _write_new_transaction(writable_sheet, row, transaction)
+        writable_sheet.write(row, category_column, float(transaction.amount))
+        placements.append(
+            WcedPlacement(
+                transaction_id=transaction.id,
+                txn_date=transaction.txn_date,
+                description=transaction.payee_raw,
+                amount=transaction.amount,
+                direction=transaction.direction,
+                category_name=category.name,
+                sheet_name=sheet_name,
+                row=row,
+                category_column=category_column,
+            )
+        )
+        new_syncs.append((transaction, sheet_name, row, category_column))
+        next_rows[sheet_name] += 1
+        written += 1
+
+    if not placements:
+        return {
+            "status": "up_to_date",
+            "message": "The registered cashbook is already up to date.",
+            "written": 0,
+            "updated": 0,
+            "already_synced": already_synced,
+        }
+
+    from io import BytesIO
+
+    output = BytesIO()
+    writable.save(output)
+    content = output.getvalue()
+    try:
+        validate_wced_cashbook(content, placements)
+    except WcedExportError as exc:
+        raise CashbookSyncError(str(exc)) from exc
+
+    backup_path = _cashbook_backup(path, "before-sync")
+    temporary = path.with_suffix(".xls.tmp")
+    try:
+        temporary.write_bytes(content)
+        temporary.replace(path)
+    except PermissionError as exc:
+        temporary.unlink(missing_ok=True)
+        raise CashbookSyncError(
+            "The live cashbook is open in Excel or locked by another program. "
+            "Close the workbook and click Sync cashbook again."
+        ) from exc
+    except OSError as exc:
+        temporary.unlink(missing_ok=True)
+        raise CashbookSyncError("The live cashbook could not be updated safely.") from exc
+
+    try:
+        for transaction, sheet_name, row, category_column in new_syncs:
+            db.add(
+                CashbookSync(
+                    transaction_id=transaction.id,
+                    cashbook_profile_id=profile.id,
+                    category_id=transaction.category_id,
+                    sheet_name=sheet_name,
+                    row_index=row,
+                    category_column=category_column,
+                )
+            )
+
+        for sync, category_column in updated_syncs:
+            transaction = next(item for item in transactions if item.id == sync.transaction_id)
+            sync.category_id = transaction.category_id
+            sync.category_column = category_column
+
+        profile.file_hash = sha256(content).hexdigest()
+        profile.updated_at = datetime.now().astimezone().replace(tzinfo=None)
+        db.commit()
+    except Exception:
+        db.rollback()
+        shutil.copy2(backup_path, path)
+        raise
+
+    return {
+        "status": "synced",
+        "message": "The registered cashbook was updated successfully.",
+        "written": written,
+        "updated": updated,
+        "already_synced": already_synced,
+        "backup": backup_path.name,
+        "cashbook_filename": profile.source_filename,
+    }
+
+
+def cashbook_status(db: Session) -> dict:
+    profile = get_active_cashbook(db)
+    final_transactions = (
+        db.query(Transaction)
+        .filter(Transaction.status.in_(FINAL_STATUSES))
+        .all()
+    )
+
+    if profile is None:
+        return {
+            "registered": False,
+            "eligible_transactions": len(final_transactions),
+            "synced": 0,
+            "needs_sync": len(final_transactions),
+        }
+
+    syncs = (
+        db.query(CashbookSync)
+        .filter(CashbookSync.cashbook_profile_id == profile.id)
+        .all()
+    )
+    by_transaction = {sync.transaction_id: sync for sync in syncs}
+    needs_sync = 0
+    synced = 0
+    for transaction in final_transactions:
+        sync = by_transaction.get(transaction.id)
+        if sync is None or sync.category_id != transaction.category_id:
+            needs_sync += 1
+        else:
+            synced += 1
+
+    return {
+        "registered": True,
+        "profile_id": profile.id,
+        "source_filename": profile.source_filename,
+        "managed_path": profile.file_path,
+        "adapter": profile.adapter,
+        "registered_at": profile.registered_at.isoformat() if profile.registered_at else None,
+        "updated_at": profile.updated_at.isoformat() if profile.updated_at else None,
+        "eligible_transactions": len(final_transactions),
+        "synced": synced,
+        "needs_sync": needs_sync,
+        "backup_count": len(list_cashbook_backups()),
+    }
+
+
+def sync_state_for_transactions(db: Session, transaction_ids: list[int]) -> dict[int, str]:
+    profile = get_active_cashbook(db)
+    if profile is None:
+        return {transaction_id: "cashbook_not_registered" for transaction_id in transaction_ids}
+
+    rows = (
+        db.query(CashbookSync)
+        .filter(CashbookSync.cashbook_profile_id == profile.id)
+        .filter(CashbookSync.transaction_id.in_(transaction_ids))
+        .all()
+        if transaction_ids
+        else []
+    )
+    syncs = {row.transaction_id: row for row in rows}
+    transactions = (
+        db.query(Transaction).filter(Transaction.id.in_(transaction_ids)).all()
+        if transaction_ids
+        else []
+    )
+    result: dict[int, str] = {}
+    for transaction in transactions:
+        if transaction.status == "pending":
+            result[transaction.id] = "waiting_review"
+            continue
+        sync = syncs.get(transaction.id)
+        if sync is None or sync.category_id != transaction.category_id:
+            result[transaction.id] = "needs_sync"
+        else:
+            result[transaction.id] = "synced"
+    return result

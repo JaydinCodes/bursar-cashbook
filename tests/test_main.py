@@ -1,11 +1,6 @@
-import os
 import unittest
-from io import BytesIO
-from types import SimpleNamespace
-from unittest.mock import patch
 
 from fastapi.testclient import TestClient
-from openpyxl import load_workbook
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -46,7 +41,7 @@ class MainApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 201)
         return response.json()["id"]
 
-    def test_import_requires_review_then_exports_selected_year(self):
+    def test_import_requires_review_then_becomes_ready_for_live_cashbook(self):
         category_id = self.create_category()
         content = (
             "Transaction Date,Details,Debit,Credit,Balance,Reference\n"
@@ -60,9 +55,11 @@ class MainApiTests(unittest.TestCase):
         )
         self.assertEqual(upload.status_code, 201)
         self.assertEqual(upload.json()["reconciliation"]["difference"], "0.00")
+        self.assertEqual(upload.json()["cashbook_sync"]["status"], "not_registered")
 
-        blocked = self.client.get("/exports/reviewed-cashbook.xlsx?year=2026")
-        self.assertEqual(blocked.status_code, 409)
+        pending_summary = self.client.get("/cashbook/summary?year=2026").json()
+        self.assertEqual(pending_summary["pending"], 1)
+        self.assertFalse(pending_summary["ready"])
 
         pending = self.client.get("/transactions/pending").json()[0]
         reviewed = self.client.post(
@@ -70,16 +67,16 @@ class MainApiTests(unittest.TestCase):
             json={"category_id": category_id, "learn": True},
         )
         self.assertEqual(reviewed.status_code, 200)
+        self.assertEqual(reviewed.json()["cashbook_sync"]["status"], "not_registered")
 
-        export = self.client.get("/exports/reviewed-cashbook.xlsx?year=2026")
-        self.assertEqual(export.status_code, 200)
-        workbook = load_workbook(BytesIO(export.content))
-        sheet = workbook["Reviewed Transactions"]
-        self.assertEqual(sheet["B2"].value, "Paper supplier")
-        self.assertEqual(sheet["G2"].value, "Stationery")
+        summary = self.client.get("/cashbook/summary?year=2026").json()
+        self.assertTrue(summary["ready"])
+        self.assertEqual(summary["cashbook_needs_sync"], 0)
+        self.assertFalse(summary["cashbook_registered"])
 
-        other_year = self.client.get("/exports/reviewed-cashbook.xlsx?year=2025")
-        self.assertEqual(other_year.status_code, 404)
+        # Phase 6 explicitly retires generated/downloaded cashbooks.
+        retired = self.client.get("/exports/wced-cashbook.xls?year=2026")
+        self.assertEqual(retired.status_code, 410)
 
     def test_overlapping_statement_skips_existing_transactions(self):
         first = (
@@ -242,36 +239,12 @@ class MainApiTests(unittest.TestCase):
         )
         self.assertEqual(correct.status_code, 200)
 
-    def test_wced_http_route_calls_real_export_service_alias(self):
-        category_id = self.create_category("Nashua")
-        content = (
-            "Transaction Date,Description,Debit,Credit,Balance\n"
-            "01/08/2026,Nashua,100.00,,900.00\n"
-        ).encode()
-        self.client.post(
-            "/statements/upload",
-            data={"bank": "Standard Bank"},
-            files={"file": ("statement.csv", content, "text/csv")},
-        )
-        pending = self.client.get("/transactions/pending").json()[0]
-        self.client.post(
-            f"/transactions/{pending['id']}/review",
-            json={"category_id": category_id, "learn": False},
-        )
-
-        with (
-            patch.dict(os.environ, {"WCED_TEMPLATE_PATH": "fake-template.xls"}),
-            patch(
-                "app.main.build_wced_cashbook",
-                return_value=SimpleNamespace(content=b"fake-xls", placements=()),
-            ) as exporter,
-            patch("app.main.validate_wced_cashbook") as validator,
-        ):
-            response = self.client.get("/exports/wced-cashbook.xls?year=2026")
-
-        self.assertEqual(response.status_code, 200)
-        exporter.assert_called_once()
-        validator.assert_called_once_with(b"fake-xls", ())
+    def test_cashbook_download_routes_are_retired(self):
+        reviewed = self.client.get("/exports/reviewed-cashbook.xlsx?year=2026")
+        wced = self.client.get("/exports/wced-cashbook.xls?year=2026")
+        self.assertEqual(reviewed.status_code, 410)
+        self.assertEqual(wced.status_code, 410)
+        self.assertIn("registered live cashbook", wced.json()["detail"])
 
     def test_trusted_exact_rule_is_auto_approved_and_populates_preview(self):
         category_id = self.create_category("Nashua")
@@ -441,13 +414,8 @@ class MainApiTests(unittest.TestCase):
         self.assertEqual(preview["rows"][0]["category_name"], "Printing")
         self.assertEqual(preview["rows"][0]["allocation_status"], "corrected")
 
-    def test_xlsx_export_neutralises_formula_text(self):
+    def test_preview_treats_formula_like_description_as_plain_data(self):
         category_id = self.create_category("Stationery")
-        content = (
-            "Transaction Date,Description,Debit,Credit,Balance\n"
-            "01/08/2026,=HYPERLINK(\"x\"),100.00,,900.00\n"
-        ).encode()
-        # CSV quoting for the embedded quotes.
         content = (
             'Transaction Date,Description,Debit,Credit,Balance\n'
             '01/08/2026,"=HYPERLINK(""x"")",100.00,,900.00\n'
@@ -463,10 +431,9 @@ class MainApiTests(unittest.TestCase):
             json={"category_id": category_id, "learn": False},
         )
 
-        export = self.client.get("/exports/reviewed-cashbook.xlsx?year=2026")
-        workbook = load_workbook(BytesIO(export.content), data_only=False)
-        value = workbook["Reviewed Transactions"]["B2"].value
-        self.assertTrue(value.startswith("'="))
+        preview = self.client.get("/cashbook/preview?year=2026").json()
+        self.assertEqual(preview["rows"][0]["description"], '=HYPERLINK("x")')
+        self.assertIn(preview["rows"][0]["sync_status"], {"cashbook_not_registered", "needs_sync"})
 
 
 if __name__ == "__main__":

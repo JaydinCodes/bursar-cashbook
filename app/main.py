@@ -1,12 +1,13 @@
 from datetime import date, datetime
+import os
+import subprocess
+import sys
 from hashlib import sha256
 from io import BytesIO
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
-from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -24,12 +25,10 @@ from .backups import (
 )
 from .bank_parser import StatementParseError, parse_statement
 from .config import (
+    CASHBOOK_BACKUP_DIR,
+    CASHBOOK_DIR,
     CONFIG_DIR,
-    DEFAULT_WCED_TEMPLATE,
     ensure_writable_directory,
-    get_wced_template_path,
-    get_wced_template_source,
-    is_wced_template_ready,
 )
 from .categorize import (
     categorize,
@@ -45,12 +44,16 @@ from .logging_config import LOG_DIR, logger
 from .models import AuditEvent, Category, Statement, Transaction
 from .reconciliation import StatementReconciliationError, reconcile_statement
 from .version import APP_VERSION
-from .wced_export import (
-    WcedExportError,
-    WcedTransaction,
-    build_wced_cashbook,
-    cashbook_target_sheet,
-    validate_wced_cashbook,
+from .wced_export import cashbook_target_sheet
+from .cashbook_sync import (
+    CashbookSyncError,
+    cashbook_status,
+    get_active_cashbook,
+    inspect_cashbook,
+    list_cashbook_backups,
+    register_cashbook,
+    sync_live_cashbook,
+    sync_state_for_transactions,
 )
 
 app = FastAPI(title="Bursar Cashbook Automation", version=APP_VERSION)
@@ -216,12 +219,6 @@ def _reviewed_transactions_for_year(db: Session, year: int) -> list[Transaction]
     )
 
 
-def _excel_safe_text(value: str | None) -> str | None:
-    if value is None:
-        return None
-    if value.startswith(("=", "+", "-", "@")):
-        return f"'{value}"
-    return value
 
 
 def _is_auto_approved(transaction: Transaction) -> bool:
@@ -301,18 +298,19 @@ def _statement_history_item(db: Session, statement: Statement) -> dict:
 
 def _setup_status(db: Session) -> dict:
     category_count = db.query(Category).count()
-    database_ok = True
     backup_writable = ensure_writable_directory(BACKUP_DIR)
     log_writable = ensure_writable_directory(LOG_DIR)
     config_writable = ensure_writable_directory(CONFIG_DIR)
-    template_ready = is_wced_template_ready()
+    cashbook_dir_writable = ensure_writable_directory(CASHBOOK_DIR)
+    cashbook_backup_writable = ensure_writable_directory(CASHBOOK_BACKUP_DIR)
+    live = cashbook_status(db)
 
     checks = [
         {
             "id": "database",
             "label": "Local cashbook database",
-            "ok": database_ok,
-            "message": "Database is ready." if database_ok else "Database is unavailable.",
+            "ok": True,
+            "message": "Database is ready.",
         },
         {
             "id": "categories",
@@ -325,20 +323,30 @@ def _setup_status(db: Session) -> dict:
             ),
         },
         {
-            "id": "wced_template",
-            "label": "WCED cashbook template",
-            "ok": template_ready,
+            "id": "live_cashbook",
+            "label": "Bursar's live cashbook",
+            "ok": live["registered"],
             "message": (
-                f"Template ready ({get_wced_template_source()})."
-                if template_ready
-                else "Upload the blank WCED .xls template before generating WCED exports."
+                f"Registered: {live['source_filename']}"
+                if live["registered"]
+                else "Register the bursar's existing .xls cashbook. This file becomes the live destination."
+            ),
+        },
+        {
+            "id": "cashbook_storage",
+            "label": "Live cashbook storage",
+            "ok": cashbook_dir_writable and cashbook_backup_writable,
+            "message": (
+                "Cashbook and cashbook-backup folders are writable."
+                if cashbook_dir_writable and cashbook_backup_writable
+                else "Cashbook storage is not writable."
             ),
         },
         {
             "id": "backups",
-            "label": "Backup storage",
+            "label": "Database backup storage",
             "ok": backup_writable,
-            "message": "Backup folder is writable." if backup_writable else "Backup folder is not writable.",
+            "message": "Database backup folder is writable." if backup_writable else "Database backup folder is not writable.",
         },
         {
             "id": "logs",
@@ -352,16 +360,18 @@ def _setup_status(db: Session) -> dict:
         "version": APP_VERSION,
         "bank": "Standard Bank",
         "category_count": category_count,
-        "template_configured": template_ready,
-        "template_source": get_wced_template_source(),
-        "ready_for_import": database_ok and category_count > 0 and backup_writable and log_writable,
-        "ready_for_wced_export": (
-            database_ok
-            and category_count > 0
-            and template_ready
+        "cashbook": live,
+        "ready_for_import": (
+            category_count > 0
             and backup_writable
             and log_writable
             and config_writable
+        ),
+        "ready_for_live_sync": (
+            category_count > 0
+            and live["registered"]
+            and cashbook_dir_writable
+            and cashbook_backup_writable
         ),
         "checks": checks,
     }
@@ -372,74 +382,134 @@ def setup_status(db: Session = Depends(get_db)):
     return _setup_status(db)
 
 
-def _validate_wced_template(content: bytes) -> None:
-    import xlrd
-
-    try:
-        workbook = xlrd.open_workbook(file_contents=content, on_demand=True)
-    except Exception as exc:
-        raise HTTPException(
-            status_code=422,
-            detail="That file is not a readable legacy .xls workbook.",
-        ) from exc
-
-    required = {
-        f"{month} {suffix}"
-        for month in ("Jan", "Feb", "Mar", "April", "May", "June", "July", "Aug", "Sept", "Oct", "Nov", "Dec")
-        for suffix in ("PC", "RC")
-    }
-    missing = sorted(required.difference(workbook.sheet_names()))
-    workbook.release_resources()
-    if missing:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "This does not look like the expected WCED cashbook template. "
-                f"Missing sheet(s): {', '.join(missing[:6])}"
-                + ("…" if len(missing) > 6 else "")
-            ),
-        )
-
-
-@app.post("/setup/wced-template")
-async def upload_wced_template(
+@app.post("/cashbook/register", status_code=201)
+async def register_live_cashbook(
     file: UploadFile = File(...),
     replace: bool = Form(False),
     db: Session = Depends(get_db),
 ):
-    filename = file.filename or "template.xls"
+    filename = file.filename or "cashbook.xls"
     if Path(filename).suffix.lower() != ".xls":
-        raise HTTPException(status_code=422, detail="The WCED template must be a legacy .xls file.")
+        raise HTTPException(status_code=422, detail="The live cashbook must be a legacy .xls workbook.")
 
     content = await file.read(MAX_TEMPLATE_BYTES + 1)
     if not content:
-        raise HTTPException(status_code=400, detail="The WCED template file is empty.")
+        raise HTTPException(status_code=400, detail="The selected cashbook file is empty.")
     if len(content) > MAX_TEMPLATE_BYTES:
-        raise HTTPException(status_code=413, detail="WCED template is too large. Maximum size is 10 MB.")
+        raise HTTPException(status_code=413, detail="Cashbook is too large. Maximum size is 10 MB.")
 
-    _validate_wced_template(content)
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-
-    if DEFAULT_WCED_TEMPLATE.exists() and not replace:
-        raise HTTPException(
-            status_code=409,
-            detail="A local WCED template is already configured. Choose replace to overwrite it.",
+    try:
+        layout = inspect_cashbook(content)
+        profile = register_cashbook(
+            db,
+            source_filename=filename,
+            content=content,
+            replace=replace,
         )
+    except CashbookSyncError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    temporary = DEFAULT_WCED_TEMPLATE.with_suffix(".xls.tmp")
-    temporary.write_bytes(content)
-    temporary.replace(DEFAULT_WCED_TEMPLATE)
+    try:
+        sync_result = sync_live_cashbook(db)
+    except CashbookSyncError as exc:
+        sync_result = {
+            "status": "needs_attention",
+            "message": str(exc),
+            "written": 0,
+            "updated": 0,
+            "already_synced": 0,
+        }
+        logger.warning(
+            "initial_live_cashbook_sync_failed",
+            extra={"cashbook_profile_id": profile.id, "reason": str(exc)},
+        )
 
     record_audit_event(
         db,
-        "setup.wced_template_configured",
-        entity_type="application",
-        details={"replaced": replace, "size_bytes": len(content)},
+        "cashbook.registered",
+        entity_type="cashbook_profile",
+        entity_id=profile.id,
+        details={
+            "source_filename": filename,
+            "adapter": layout["adapter"],
+            "sheet_count": layout["sheet_count"],
+            "replace": replace,
+        },
     )
     db.commit()
-    logger.info("wced_template_configured", extra={"replaced": replace, "size_bytes": len(content)})
-    return _setup_status(db)
+    logger.info(
+        "live_cashbook_registered",
+        extra={
+            "cashbook_profile_id": profile.id,
+            "adapter": layout["adapter"],
+            "source_filename": filename,
+        },
+    )
+    return {
+        "cashbook": cashbook_status(db),
+        "layout": {
+            "adapter": layout["adapter"],
+            "sheet_count": layout["sheet_count"],
+            "payment_category_count": len(layout["payment_categories"]),
+            "receipt_category_count": len(layout["receipt_categories"]),
+        },
+        "sync": sync_result,
+    }
 
+
+@app.get("/cashbook/status")
+def live_cashbook_status(db: Session = Depends(get_db)):
+    return cashbook_status(db)
+
+
+@app.get("/cashbook/backups")
+def live_cashbook_backups():
+    return list_cashbook_backups()
+
+
+@app.post("/cashbook/sync")
+def sync_cashbook_now(db: Session = Depends(get_db)):
+    try:
+        result = sync_live_cashbook(db)
+    except CashbookSyncError as exc:
+        logger.warning("live_cashbook_sync_failed", extra={"reason": str(exc)})
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    record_audit_event(
+        db,
+        "cashbook.synced",
+        entity_type="cashbook_profile",
+        entity_id=(get_active_cashbook(db).id if get_active_cashbook(db) else None),
+        details=result,
+    )
+    db.commit()
+    logger.info("live_cashbook_synced", extra=result)
+    return {**result, "cashbook": cashbook_status(db)}
+
+
+@app.post("/cashbook/open")
+def open_live_cashbook(db: Session = Depends(get_db)):
+    profile = get_active_cashbook(db)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="No live cashbook is registered.")
+    path = Path(profile.file_path)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="The registered cashbook file is missing.")
+
+    try:
+        if os.name == "nt":
+            os.startfile(path)  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(path)])
+        else:
+            subprocess.Popen(["xdg-open", str(path)])
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not open the cashbook automatically. File: {path}",
+        ) from exc
+
+    return {"opened": True, "filename": profile.source_filename, "managed_path": str(path)}
 
 @app.get("/backups")
 def backup_history():
@@ -507,7 +577,7 @@ def restore_backup(filename: str, request: RestoreBackupRequest):
     }
 
 
-def _export_summary(db: Session, year: int) -> dict:
+def _cashbook_summary(db: Session, year: int) -> dict:
     start, end = _year_bounds(year)
     transactions = (
         db.query(Transaction)
@@ -515,7 +585,6 @@ def _export_summary(db: Session, year: int) -> dict:
         .order_by(Transaction.txn_date, Transaction.id)
         .all()
     )
-
     statements = (
         db.query(Statement)
         .filter(Statement.period_end >= start, Statement.period_start < end)
@@ -546,6 +615,10 @@ def _export_summary(db: Session, year: int) -> dict:
         for statement in statements
     )
     difference = sum((statement.reconciliation_difference for statement in statements), start=0)
+    sync_states = sync_state_for_transactions(db, [transaction.id for transaction in transactions])
+    synced = sum(1 for state in sync_states.values() if state == "synced")
+    needs_sync = sum(1 for state in sync_states.values() if state == "needs_sync")
+    live = cashbook_status(db)
 
     return {
         "year": year,
@@ -560,24 +633,28 @@ def _export_summary(db: Session, year: int) -> dict:
         "statement_count": len(statements),
         "all_statements_reconciled": all_reconciled,
         "reconciliation_difference": f"{difference:.2f}",
-        "wced_template_configured": is_wced_template_ready(),
-        "ready_for_reviewed_export": bool(transactions) and pending == 0 and reviewed == len(transactions) and all_reconciled,
-        "ready_for_wced_export": (
-            bool(transactions)
-            and pending == 0
-            and reviewed == len(transactions)
-            and all_reconciled
-            and is_wced_template_ready()
-        ),
+        "cashbook_registered": live["registered"],
+        "cashbook_synced": synced,
+        "cashbook_needs_sync": needs_sync,
+        "ready": bool(transactions) and pending == 0 and reviewed == len(transactions) and all_reconciled,
     }
 
 
-@app.get("/exports/summary")
-def export_summary(
+@app.get("/cashbook/summary")
+def cashbook_summary(
     year: int = Query(..., ge=2000, le=2100),
     db: Session = Depends(get_db),
 ):
-    return _export_summary(db, year)
+    return _cashbook_summary(db, year)
+
+
+@app.get("/exports/summary", include_in_schema=False)
+def deprecated_export_summary(
+    year: int = Query(..., ge=2000, le=2100),
+    db: Session = Depends(get_db),
+):
+    # Compatibility alias for Phase 3/5 frontends. Phase 6 no longer exports a cashbook.
+    return _cashbook_summary(db, year)
 
 
 @app.get("/cashbook/preview")
@@ -592,7 +669,11 @@ def cashbook_preview(
         .order_by(Transaction.txn_date, Transaction.id)
         .all()
     )
-    rows = [_cashbook_preview_item(transaction) for transaction in transactions]
+    sync_states = sync_state_for_transactions(db, [transaction.id for transaction in transactions])
+    rows = [
+        {**_cashbook_preview_item(transaction), "sync_status": sync_states.get(transaction.id, "waiting_review")}
+        for transaction in transactions
+    ]
 
     allocation_map: dict[tuple[str, str, str], dict] = {}
     for row in rows:
@@ -641,7 +722,7 @@ def cashbook_preview(
             "minimum_historical_hits": AUTO_APPROVE_MIN_HITS,
             "income_auto_approval": True,
         },
-        "summary": _export_summary(db, year),
+        "summary": _cashbook_summary(db, year),
         "statements": [
             {
                 "statement_id": statement.id,
@@ -939,6 +1020,17 @@ async def upload_statement(
     db.commit()
     db.refresh(statement)
 
+    try:
+        cashbook_sync_result = sync_live_cashbook(db)
+    except CashbookSyncError as exc:
+        cashbook_sync_result = {
+            "status": "needs_attention",
+            "message": str(exc),
+            "written": 0,
+            "updated": 0,
+        }
+        logger.warning("automatic_cashbook_sync_failed", extra={"statement_id": statement.id, "reason": str(exc)})
+
     logger.info(
         "statement_import_completed",
         extra={
@@ -963,6 +1055,7 @@ async def upload_statement(
             "start": period_start.isoformat(),
             "end": period_end.isoformat(),
         },
+        "cashbook_sync": cashbook_sync_result,
         "reconciliation": {
             "status": "passed",
             "opening_balance": str(reconciliation.opening_balance),
@@ -1107,6 +1200,15 @@ def review_transaction(
         learning_changed = True
 
     if same_final_category and not learning_changed:
+        try:
+            cashbook_sync_result = sync_live_cashbook(db, transaction_ids=[transaction.id])
+        except CashbookSyncError as exc:
+            cashbook_sync_result = {
+                "status": "needs_attention",
+                "message": str(exc),
+                "written": 0,
+                "updated": 0,
+            }
         logger.info(
             "transaction_review_idempotent_retry",
             extra={"transaction_id": transaction.id, "category_id": category.id},
@@ -1116,9 +1218,11 @@ def review_transaction(
             "status": transaction.status,
             "learned": False,
             "idempotent": True,
+            "cashbook_sync": cashbook_sync_result,
         }
 
     transaction.category_id = category.id
+    transaction.category = category
     transaction.status = (
         "approved"
         if transaction.suggested_category_id is not None
@@ -1142,6 +1246,17 @@ def review_transaction(
     )
     db.commit()
 
+    try:
+        cashbook_sync_result = sync_live_cashbook(db, transaction_ids=[transaction.id])
+    except CashbookSyncError as exc:
+        cashbook_sync_result = {
+            "status": "needs_attention",
+            "message": str(exc),
+            "written": 0,
+            "updated": 0,
+        }
+        logger.warning("automatic_cashbook_sync_failed", extra={"transaction_id": transaction.id, "reason": str(exc)})
+
     logger.info(
         "transaction_reviewed",
         extra={
@@ -1158,162 +1273,27 @@ def review_transaction(
         "status": transaction.status,
         "learned": learning_changed,
         "idempotent": False,
+        "cashbook_sync": cashbook_sync_result,
     }
 
 
-@app.get("/exports/reviewed-cashbook.xlsx")
-def export_reviewed_cashbook(
-    year: int = Query(..., ge=2000, le=2100),
-    db: Session = Depends(get_db),
-):
-    transactions = _reviewed_transactions_for_year(db, year)
-
-    workbook = Workbook()
-    sheet = workbook.active
-    sheet.title = "Reviewed Transactions"
-    sheet.append(
-        [
-            "Date",
-            "Description",
-            "Reference",
-            "Money Out",
-            "Money In",
-            "Balance",
-            "Category",
-            "Review Status",
-        ]
-    )
-
-    for transaction in transactions:
-        sheet.append(
-            [
-                transaction.txn_date,
-                _excel_safe_text(transaction.payee_raw),
-                _excel_safe_text(transaction.reference),
-                float(transaction.amount) if transaction.direction == "debit" else None,
-                float(transaction.amount) if transaction.direction == "credit" else None,
-                float(transaction.balance_after),
-                _excel_safe_text(transaction.category.name),
-                transaction.status,
-            ]
-        )
-
-    header_fill = PatternFill("solid", fgColor="0F766E")
-    for cell in sheet[1]:
-        cell.font = Font(bold=True, color="FFFFFF")
-        cell.fill = header_fill
-
-    sheet.freeze_panes = "A2"
-    sheet.auto_filter.ref = sheet.dimensions
-    widths = {
-        "A": 14,
-        "B": 42,
-        "C": 24,
-        "D": 16,
-        "E": 16,
-        "F": 16,
-        "G": 34,
-        "H": 16,
-    }
-    for column, width in widths.items():
-        sheet.column_dimensions[column].width = width
-
-    for row in sheet.iter_rows(min_row=2, min_col=1, max_col=6):
-        row[0].number_format = "yyyy-mm-dd"
-        for cell in row[3:6]:
-            cell.number_format = 'R #,##0.00'
-
-    stream = BytesIO()
-    workbook.save(stream)
-    stream.seek(0)
-
-    record_audit_event(
-        db,
-        "export.reviewed_cashbook",
-        entity_type="financial_year",
-        entity_id=year,
-        details={"year": year, "transaction_count": len(transactions)},
-    )
-    db.commit()
-    logger.info(
-        "reviewed_cashbook_exported",
-        extra={"year": year, "transaction_count": len(transactions)},
-    )
-
-    return StreamingResponse(
-        stream,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={
-            "Content-Disposition": f'attachment; filename="reviewed-cashbook-{year}.xlsx"'
-        },
+@app.get("/exports/reviewed-cashbook.xlsx", include_in_schema=False)
+def retired_reviewed_cashbook_export():
+    raise HTTPException(
+        status_code=410,
+        detail=(
+            "Phase 6 does not generate a separate cashbook file. Approved transactions "
+            "are synchronized into the registered live cashbook."
+        ),
     )
 
 
-@app.get("/exports/wced-cashbook.xls")
-def download_wced_cashbook(
-    year: int = Query(..., ge=2000, le=2100),
-    db: Session = Depends(get_db),
-):
-    template_path = get_wced_template_path()
-    if template_path is None:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "The WCED cashbook template is not configured. Open Setup and upload "
-                "the blank WCED .xls template before exporting."
-            ),
-        )
-
-    transactions = _reviewed_transactions_for_year(db, year)
-    records = [
-        WcedTransaction(
-            txn_date=transaction.txn_date,
-            description=transaction.payee_raw,
-            amount=transaction.amount,
-            direction=transaction.direction,
-            category_name=transaction.category.name,
-            transaction_id=transaction.id,
-        )
-        for transaction in transactions
-    ]
-
-    try:
-        export_result = build_wced_cashbook(template_path, records)
-        validate_wced_cashbook(export_result.content, export_result.placements)
-        content = export_result.content
-    except WcedExportError as exc:
-        logger.warning(
-            "wced_export_validation_failed",
-            extra={"year": year, "validation_type": type(exc).__name__},
-        )
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-    record_audit_event(
-        db,
-        "export.wced_cashbook",
-        entity_type="financial_year",
-        entity_id=year,
-        details={
-            "year": year,
-            "transaction_count": len(transactions),
-            "final_validation": "passed",
-            "validated_placements": len(export_result.placements),
-        },
-    )
-    db.commit()
-    logger.info(
-        "wced_cashbook_exported",
-        extra={
-            "year": year,
-            "transaction_count": len(transactions),
-            "final_validation": "passed",
-        },
-    )
-
-    return StreamingResponse(
-        BytesIO(content),
-        media_type="application/vnd.ms-excel",
-        headers={
-            "Content-Disposition": f'attachment; filename="wced-cashbook-{year}.xls"'
-        },
+@app.get("/exports/wced-cashbook.xls", include_in_schema=False)
+def retired_wced_cashbook_export():
+    raise HTTPException(
+        status_code=410,
+        detail=(
+            "Cashbook download has been retired. Open the registered live cashbook; "
+            "the application updates that workbook in place."
+        ),
     )

@@ -4,8 +4,8 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Bursar Cashbook Help</title>
   <style>
-    :root { font-family: system-ui, sans-serif; color: #172033; background: #f8fafc; }
-    body { max-width: 850px; margin: 2rem auto; padding: 0 1rem 3rem; line-height: 1.55; }
+    :root { font-family:system-ui,sans-serif; color:#172033; background:#f8fafc; }
+    body { max-width:850px; margin:2rem auto; padding:0 1rem 3rem; line-height:1.55; }
     section { background:white; border:1px solid #dbe3ed; border-radius:.5rem; padding:1rem 1.2rem; margin:1rem 0; }
     .button { display:inline-block; background:#0f766e; color:white; padding:.6rem .9rem; border-radius:.3rem; text-decoration:none; }
     .muted { color:#64748b; } code { background:#e2e8f0; padding:.1rem .25rem; border-radius:.2rem; }
@@ -14,13 +14,13 @@
 <body>
   <a class="button" href="/">← Back to cashbook</a>
   <h1>Bursar Cashbook Help</h1>
-  <p class="muted">Short guide for the Standard Bank pilot.</p>
-  <section><h2>Starting the cashbook</h2><p>Double-click <strong>START CASHBOOK.bat</strong>. Keep the black Cashbook window open while you work. Your browser will open the local cashbook automatically.</p></section>
-  <section><h2>1. Import a statement</h2><p>Download the Standard Bank statement as CSV, XLS or XLSX. Choose it under <strong>Import statement</strong>. The cashbook will validate the transaction structure and running balances before anything is saved.</p><p>If reconciliation fails, do not continue with that statement. Download a support bundle and contact the developer.</p></section>
-  <section><h2>2. Review transactions</h2><p>Every new transaction remains pending until you select or approve its category. Debit transactions use expense categories; credits use income categories.</p></section>
-  <section><h2>3. Export</h2><p>Select the financial year and choose the export you need. A confirmation screen shows transaction totals, money in/out, pending reviews and reconciliation status. The export button stays disabled until the year is ready.</p></section>
-  <section><h2>If something goes wrong</h2><p>Look for an error ID such as <code>ERR-20260831-12AB34CD</code>. Return to the cashbook and click <strong>Download support bundle</strong>. Send the ZIP and the error ID to the developer. The support bundle excludes full transaction descriptions and bank references.</p></section>
-  <section><h2>Backups</h2><p>The app automatically creates backups. You can also create one manually. Restore only when instructed or when you intentionally need to return to an earlier state. A new safety backup is created before every restore.</p></section>
-  <section><h2>Pilot rule</h2><p>During the pilot, compare generated WCED outputs with the normal manual process before treating the generated workbook as final.</p></section>
+  <p class="muted">Phase 6 local pilot: the bursar's registered workbook is the live destination.</p>
+  <section><h2>Starting the application</h2><p>Double-click <strong>START CASHBOOK.bat</strong> and keep that window open. The browser interface will open automatically.</p></section>
+  <section><h2>1. Register the live cashbook</h2><p>Choose the actual `.xls` workbook the bursar normally captures into. The application parses its monthly PC/RC sheets and category columns, stores that workbook as the managed live cashbook, and writes approved transactions into that same file.</p><p><strong>No second cashbook is generated.</strong></p></section>
+  <section><h2>2. Import a Standard Bank statement</h2><p>Upload CSV, XLS or XLSX. The application validates transaction structure, detects duplicates, and reconciles the running balances before accepting the statement.</p></section>
+  <section><h2>3. Review exceptions</h2><p>Trusted exact historical classifications are approved automatically. New, fuzzy or uncertain classifications appear in the review table. Saving a classification immediately attempts to sync that transaction into the live cashbook.</p></section>
+  <section><h2>4. Check the cashbook</h2><p>Use <strong>Live cashbook preview</strong> to see the target sheet, category and sync state. Click <strong>Open cashbook in Excel</strong> when you want to inspect the actual workbook.</p><p>If Excel already has the workbook open while the app needs to write, close Excel and click <strong>Sync cashbook now</strong>.</p></section>
+  <section><h2>Safety</h2><p>Imported bank transactions are fingerprinted. Synchronized cashbook rows are tracked separately, so retrying sync cannot append the same transaction again. If an already-synced category is corrected, the original row is reallocated rather than duplicated. A cashbook backup is created before each write.</p></section>
+  <section><h2>If something goes wrong</h2><p>Look for an error ID such as <code>ERR-20260831-12AB34CD</code>. Download the support bundle and send both to the developer.</p></section>
 </body>
 </html>

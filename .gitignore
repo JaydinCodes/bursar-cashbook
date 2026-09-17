@@ -14,3 +14,5 @@ data/private/
 scripts/node_modules/
 *.db-journal
 config/*.xls
+cashbooks/*.xls
+cashbook_backups/

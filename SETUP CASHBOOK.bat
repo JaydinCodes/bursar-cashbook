@@ -48,6 +48,8 @@ if not exist "cashbook.db" (
 if not exist "config" mkdir config
 if not exist "backups" mkdir backups
 if not exist "logs" mkdir logs
+if not exist "cashbooks" mkdir cashbooks
+if not exist "cashbook_backups" mkdir cashbook_backups
 
 echo.
 echo Setup completed successfully.

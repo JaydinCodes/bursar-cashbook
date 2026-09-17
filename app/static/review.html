@@ -3,313 +3,271 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Bursar Cashbook</title>
+  <title>Bursar Cashbook Automation</title>
   <style>
-    :root { font-family: system-ui, sans-serif; color: #172033; background: #f8fafc; }
-    body { max-width: 1180px; margin: 2rem auto; padding: 0 1rem 3rem; }
-    h1 { margin: 0; } h2 { margin-top: 2rem; } h3 { margin-bottom: .4rem; }
-    .muted { color: #64748b; } .good { color: #166534; font-weight: 700; } .bad { color: #991b1b; font-weight: 700; }
-    .panel { background: white; border: 1px solid #dbe3ed; border-radius: .5rem; padding: 1rem; margin-top: 1rem; }
-    .header-row { display: flex; gap: .75rem; align-items: center; justify-content: space-between; flex-wrap: wrap; }
-    .header-title { display: flex; gap: .75rem; align-items: baseline; flex-wrap: wrap; }
-    .version { background: #e2e8f0; border-radius: 999px; padding: .2rem .55rem; font-size: .82rem; }
-    form, .actions { display: flex; gap: .75rem; flex-wrap: wrap; align-items: end; }
-    label { display: grid; gap: .3rem; }
-    button, .button { background: #0f766e; color: white; border: 0; border-radius: .3rem; padding: .65rem .9rem; cursor: pointer; text-decoration: none; font: inherit; }
-    button.secondary, .button.secondary { background: #475569; } button.danger { background: #991b1b; }
-    button:disabled { opacity: .55; cursor: not-allowed; }
-    input, select { min-height: 2.25rem; padding: 0 .45rem; border: 1px solid #cbd5e1; border-radius: .3rem; background: white; }
-    select { min-width: 220px; }
-    table { width: 100%; border-collapse: collapse; margin-top: 1rem; background: white; }
-    th, td { border-bottom: 1px solid #dbe3ed; text-align: left; padding: .65rem .45rem; vertical-align: top; }
-    th { background: #f1f5f9; }
-    #message { min-height: 1.5rem; font-weight: 600; } #reconciliation { white-space: pre-line; }
-    .money-out { color: #991b1b; } .money-in { color: #166534; } .status-pass { color: #166534; font-weight: 700; }
-    .support-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
-    .scroll { max-height: 320px; overflow: auto; border: 1px solid #e2e8f0; border-radius: .4rem; }
-    .scroll table { margin: 0; } .event-details { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .82rem; white-space: pre-wrap; }
-    dialog { width: min(680px, calc(100% - 2rem)); border: 0; border-radius: .7rem; padding: 0; box-shadow: 0 24px 60px rgba(15, 23, 42, .28); }
-    dialog::backdrop { background: rgba(15, 23, 42, .55); }
-    .dialog-body { padding: 1.25rem; } .dialog-actions { display: flex; justify-content: flex-end; gap: .6rem; padding: 1rem 1.25rem; background: #f8fafc; border-top: 1px solid #e2e8f0; }
-    .check-list { display: grid; gap: .6rem; margin: 1rem 0; } .check { padding: .7rem; border: 1px solid #e2e8f0; border-radius: .4rem; }
-    .summary-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .6rem; margin: 1rem 0; }
-    .summary-item { background: #f8fafc; border: 1px solid #e2e8f0; padding: .75rem; border-radius: .4rem; }
-    @media (max-width: 900px) { .support-grid { grid-template-columns: 1fr; } }
-    @media (max-width: 760px) { table { display: block; overflow-x: auto; } .button, button { width: 100%; text-align: center; } .summary-grid { grid-template-columns: 1fr; } }
+    :root { color-scheme: light; }
+    body { font-family: system-ui, sans-serif; max-width: 1240px; margin: 2rem auto; padding: 0 1rem 4rem; color: #172033; background: #f8fafc; }
+    h1,h2,h3 { margin: 0 0 .5rem; }
+    h2 { margin-top: 0; }
+    .header { display:flex; justify-content:space-between; gap:1rem; align-items:flex-start; margin-bottom:1rem; }
+    .actions { display:flex; gap:.5rem; flex-wrap:wrap; }
+    .panel { background:white; border:1px solid #dbe3ed; border-radius:.6rem; padding:1rem; margin:1rem 0; }
+    .muted { color:#64748b; }
+    .good { color:#047857; font-weight:700; }
+    .bad { color:#b91c1c; font-weight:700; }
+    .warn { color:#a16207; font-weight:700; }
+    button,.button { background:#0f766e; color:white; border:0; border-radius:.35rem; padding:.62rem .9rem; cursor:pointer; text-decoration:none; }
+    button.secondary,.button.secondary { background:#475569; }
+    button:disabled { opacity:.5; cursor:not-allowed; }
+    form { display:flex; gap:.75rem; flex-wrap:wrap; align-items:end; }
+    label { display:grid; gap:.3rem; }
+    input,select { padding:.5rem; border:1px solid #cbd5e1; border-radius:.3rem; background:white; }
+    select { min-width:220px; }
+    table { width:100%; border-collapse:collapse; margin-top:.7rem; }
+    th,td { border-bottom:1px solid #e2e8f0; text-align:left; padding:.58rem .4rem; vertical-align:top; }
+    th { font-size:.87rem; color:#475569; }
+    .scroll { overflow:auto; }
+    .summary-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(145px,1fr)); gap:.65rem; margin:.75rem 0; }
+    .summary-item { border:1px solid #e2e8f0; border-radius:.4rem; padding:.7rem; background:#f8fafc; }
+    .check { padding:.55rem 0; border-bottom:1px solid #eef2f7; }
+    #message { min-height:1.5rem; font-weight:600; }
+    .money-out { color:#b91c1c; }
+    .money-in { color:#047857; }
+    code { background:#f1f5f9; padding:.1rem .25rem; border-radius:.2rem; }
   </style>
 </head>
 <body>
-  <div class="header-row">
-    <div class="header-title">
-      <h1>Bursar Cashbook</h1>
-      <span id="app-version" class="version">Loading version…</span>
+  <div class="header">
+    <div>
+      <h1>Bursar Cashbook Automation <span id="version" class="muted"></span></h1>
+      <p class="muted">Standard Bank statement → validation → classification → human exceptions → automatic update of the bursar's existing cashbook.</p>
     </div>
     <div class="actions">
-      <button class="secondary" type="button" id="open-setup">Setup</button>
       <a class="button secondary" href="/help">Help</a>
+      <a class="button secondary" href="/diagnostics/export">Support bundle</a>
     </div>
   </div>
-  <p class="muted">Standard Bank pilot. Trusted historical matches are allocated automatically; only uncertain transactions require review.</p>
-
-  <section class="panel">
-    <h2>1. Import statement</h2>
-    <form id="upload-form">
-      <label>Bank<select name="bank"><option selected>Standard Bank</option></select></label>
-      <label>Statement<input name="file" type="file" accept=".csv,.xls,.xlsx" required></label>
-      <button type="submit">Upload statement</button>
-    </form>
-    <p id="reconciliation" class="muted"></p>
-  </section>
-
-  <section class="panel">
-    <h2>2. Categories</h2>
-    <form id="category-form">
-      <label>New category<input name="name" placeholder="e.g. LTSM: Stationery" required></label>
-      <label>Type<select name="type"><option value="expense">Expense</option><option value="income">Income</option></select></label>
-      <button type="submit">Add category</button>
-    </form>
-  </section>
-
-  <section class="panel">
-    <h2>5. Export</h2>
-    <div class="actions">
-      <label>Financial year<input id="export-year" type="number" min="2000" max="2100" required></label>
-      <button type="button" id="reviewed-export">Generate reviewed cashbook</button>
-      <button type="button" id="wced-export">Generate WCED cashbook</button>
-    </div>
-    <p class="muted">A confirmation summary is shown before every export. The generated WCED workbook is reopened and every written placement is validated before download.</p>
-  </section>
 
   <p id="message"></p>
 
-  <h2>3. Exceptions requiring review</h2>
-  <table>
-    <thead><tr><th>Date</th><th>Description</th><th>Reference</th><th>Amount</th><th>Balance</th><th>Suggestion</th><th>Approve / correct</th></tr></thead>
-    <tbody id="rows"></tbody>
-  </table>
+  <section class="panel">
+    <h2>1. Live cashbook</h2>
+    <p class="muted">Register the bursar's actual cashbook once. The application manages this same workbook and writes approved transactions directly into it. It does not generate a second cashbook.</p>
+    <div id="cashbook-status" class="check"></div>
+    <form id="cashbook-form">
+      <label>Existing cashbook (.xls)
+        <input name="file" type="file" accept=".xls" required>
+      </label>
+      <label><span>Replace unsynchronised registration</span><input name="replace" type="checkbox"></label>
+      <button>Register cashbook</button>
+    </form>
+    <div class="actions" style="margin-top:.75rem">
+      <button type="button" id="sync-cashbook">Sync cashbook now</button>
+      <button type="button" class="secondary" id="open-cashbook">Open cashbook in Excel</button>
+    </div>
+    <p class="muted">If Excel has the cashbook open while the app needs to write, close Excel and click <strong>Sync cashbook now</strong>.</p>
+  </section>
 
   <section class="panel">
-    <div class="header-row">
-      <div><h2>4. Cashbook preview</h2><p class="muted">This is the cashbook representation that will be written into the real WCED Excel template.</p></div>
-      <button type="button" class="secondary" id="refresh-preview">Refresh preview</button>
+    <h2>2. Import Standard Bank statement</h2>
+    <form id="upload-form">
+      <input type="hidden" name="bank" value="Standard Bank">
+      <label>Statement
+        <input name="file" type="file" accept=".csv,.xls,.xlsx" required>
+      </label>
+      <button>Import statement</button>
+    </form>
+    <div id="reconciliation-summary"></div>
+  </section>
+
+  <section class="panel">
+    <div class="header">
+      <div><h2>3. Exceptions requiring review</h2><p class="muted">Trusted exact historical matches are allocated automatically. Only uncertain classifications appear here.</p></div>
+      <button type="button" class="secondary" id="refresh-review">Refresh</button>
+    </div>
+    <div class="scroll"><table>
+      <thead><tr><th>Date</th><th>Description</th><th>Reference</th><th>Amount</th><th>Suggested category</th><th>Approve / correct</th></tr></thead>
+      <tbody id="pending-rows"></tbody>
+    </table></div>
+  </section>
+
+  <section class="panel">
+    <div class="header">
+      <div><h2>4. Live cashbook preview</h2><p class="muted">Shows where every transaction belongs and whether it has already been written into the registered workbook.</p></div>
+      <div class="actions">
+        <label>Year <input id="year" type="number" min="2000" max="2100"></label>
+        <button type="button" class="secondary" id="refresh-preview">Refresh</button>
+      </div>
     </div>
     <div id="automation-summary" class="summary-grid"></div>
-    <h3>Reconciliation</h3>
-    <div id="preview-reconciliation" class="scroll"></div>
+    <div id="preview-reconciliation"></div>
     <h3>Category allocations</h3>
     <div class="scroll"><table><thead><tr><th>Type</th><th>Category</th><th>Status</th><th>Transactions</th><th>Total</th><th>Sheets</th></tr></thead><tbody id="allocation-preview"></tbody></table></div>
-    <h3>Cashbook rows</h3>
-    <div class="scroll"><table><thead><tr><th>Date</th><th>Sheet</th><th>Description</th><th>Amount</th><th>Category</th><th>Status</th><th>Change allocation</th></tr></thead><tbody id="cashbook-preview"></tbody></table></div>
+    <h3 style="margin-top:1rem">Transactions</h3>
+    <div class="scroll"><table><thead><tr><th>Date</th><th>Sheet</th><th>Description</th><th>Amount</th><th>Category</th><th>Classification</th><th>Cashbook</th><th>Change allocation</th></tr></thead><tbody id="cashbook-preview"></tbody></table></div>
   </section>
 
   <section class="panel">
-    <h2>Support & history</h2>
-    <p class="muted">If something breaks, download the support bundle and send the ZIP to the developer. It excludes full transaction descriptions and bank references.</p>
+    <h2>5. History & support</h2>
     <div class="actions">
-      <a class="button" href="/diagnostics/export">Download support bundle</a>
-      <button class="secondary" type="button" id="refresh-history">Refresh history</button>
+      <button type="button" class="secondary" id="create-db-backup">Create database backup</button>
     </div>
-    <div class="support-grid">
-      <div><h3>Import history</h3><div class="scroll"><table><thead><tr><th>When</th><th>Period</th><th>Imported</th><th>Review</th><th>Recon</th></tr></thead><tbody id="import-history"></tbody></table></div></div>
-      <div><h3>Audit history</h3><div class="scroll"><table><thead><tr><th>When</th><th>Event</th><th>Details</th></tr></thead><tbody id="audit-history"></tbody></table></div></div>
-    </div>
+    <h3 style="margin-top:1rem">Statement imports</h3>
+    <div class="scroll"><table><thead><tr><th>Imported</th><th>Period</th><th>Rows</th><th>Workflow</th><th>Reconciliation</th></tr></thead><tbody id="import-history"></tbody></table></div>
+    <h3 style="margin-top:1rem">Recent audit events</h3>
+    <div class="scroll"><table><thead><tr><th>Time</th><th>Event</th><th>Entity</th></tr></thead><tbody id="audit-history"></tbody></table></div>
   </section>
-
-  <section class="panel">
-    <h2>Backups</h2>
-    <p class="muted">A safety backup is created automatically before imports and restores. Restore only when you intentionally need to return to an earlier database state.</p>
-    <div class="actions"><button type="button" id="create-backup">Create backup now</button><button class="secondary" type="button" id="refresh-backups">Refresh backups</button></div>
-    <div class="scroll"><table><thead><tr><th>Created</th><th>Size</th><th>Backup</th><th>Action</th></tr></thead><tbody id="backup-history"></tbody></table></div>
-  </section>
-
-  <dialog id="setup-dialog">
-    <div class="dialog-body">
-      <h2>Cashbook setup</h2>
-      <p class="muted">These checks make sure this installation is ready for the pilot.</p>
-      <div id="setup-checks" class="check-list"></div>
-      <form id="template-form">
-        <label>Blank WCED .xls template<input name="file" type="file" accept=".xls" required></label>
-        <label><span>Replace existing template</span><input name="replace" type="checkbox"></label>
-        <button type="submit">Save WCED template</button>
-      </form>
-      <p id="setup-message" class="muted"></p>
-    </div>
-    <div class="dialog-actions"><button type="button" class="secondary" id="close-setup">Close</button></div>
-  </dialog>
-
-  <dialog id="export-dialog">
-    <div class="dialog-body">
-      <h2 id="export-dialog-title">Confirm export</h2>
-      <div id="export-summary"></div>
-    </div>
-    <div class="dialog-actions"><button type="button" class="secondary" id="cancel-export">Cancel</button><button type="button" id="confirm-export">Generate cashbook</button></div>
-  </dialog>
 
   <script>
     let categories = [];
-    let pendingExport = null;
     const message = document.querySelector('#message');
-    const reconciliation = document.querySelector('#reconciliation');
-    const yearInput = document.querySelector('#export-year');
-    const setupDialog = document.querySelector('#setup-dialog');
-    const exportDialog = document.querySelector('#export-dialog');
+    const yearInput = document.querySelector('#year');
+    yearInput.value = new Date().getFullYear();
 
     const escapeHtml = value => String(value ?? '').replace(/[&<>'"]/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
-    const formatDateTime = value => { if (!value) return ''; const parsed = new Date(value); return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString(); };
-    const apiError = (data, fallback='Request failed.') => data?.error_id ? `${data?.detail || fallback} Error ID: ${data.error_id}` : (data?.detail || fallback);
-    const formatBytes = bytes => bytes < 1024 * 1024 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-
-    async function readJson(response) {
-      try { return await response.json(); } catch { return {}; }
-    }
+    const readJson = async response => { try { return await response.json(); } catch { return {}; } };
+    const apiError = (data, fallback='Request failed.') => data.detail || (data.error_id ? `${fallback} Error ID: ${data.error_id}` : fallback);
+    const formatDateTime = value => value ? new Date(value).toLocaleString() : '';
 
     async function loadHealth() {
-      const response = await fetch('/health');
-      const data = await response.json();
-      document.querySelector('#app-version').textContent = `Pilot v${data.version}`;
+      const data = await (await fetch('/health')).json();
+      document.querySelector('#version').textContent = `v${data.version}`;
     }
 
-    async function loadSetup({openWhenIncomplete=false} = {}) {
-      const response = await fetch('/setup/status');
-      const data = await response.json();
-      document.querySelector('#setup-checks').innerHTML = data.checks.map(check => `<div class="check"><div class="${check.ok ? 'good' : 'bad'}">${check.ok ? '✓' : '✗'} ${escapeHtml(check.label)}</div><div class="muted">${escapeHtml(check.message)}</div></div>`).join('');
-      if (openWhenIncomplete && !data.ready_for_wced_export) setupDialog.showModal();
-      return data;
+    async function loadCashbookStatus() {
+      const response = await fetch('/cashbook/status');
+      const data = await readJson(response);
+      const target = document.querySelector('#cashbook-status');
+      if (!data.registered) {
+        target.innerHTML = '<span class="bad">✗ No live cashbook registered.</span> <span class="muted">Register the bursar\'s existing workbook before expecting automatic population.</span>';
+        return;
+      }
+      const state = data.needs_sync === 0 ? '<span class="good">UP TO DATE</span>' : `<span class="warn">${data.needs_sync} NEED SYNC</span>`;
+      target.innerHTML = `<strong>${escapeHtml(data.source_filename)}</strong> · ${escapeHtml(data.adapter)} · ${state}<br><span class="muted">${data.synced} transaction(s) synchronised · ${data.backup_count} cashbook backup(s)<br>Managed file: <code>${escapeHtml(data.managed_path)}</code></span>`;
     }
 
-    async function load() {
+    async function loadPending() {
       const [categoryResponse, transactionResponse] = await Promise.all([fetch('/categories'), fetch('/transactions/pending')]);
-      categories = await categoryResponse.json();
-      const transactions = await transactionResponse.json();
-      document.querySelector('#rows').innerHTML = transactions.map(transaction => {
-        const requiredType = transaction.direction === 'debit' ? 'expense' : 'income';
-        const validCategories = categories.filter(category => category.type === requiredType);
+      categories = await readJson(categoryResponse);
+      const transactions = await readJson(transactionResponse);
+      document.querySelector('#pending-rows').innerHTML = transactions.map(transaction => {
+        const expectedType = transaction.direction === 'debit' ? 'expense' : 'income';
+        const validCategories = categories.filter(category => category.type === expectedType);
         const blank = `<option value="" ${transaction.suggested_category_id ? '' : 'selected'} disabled>Select category</option>`;
         const options = validCategories.map(category => `<option value="${category.id}" ${category.id === transaction.suggested_category_id ? 'selected' : ''}>${escapeHtml(category.name)}</option>`).join('');
-        const suggestion = transaction.suggested_category ? `${escapeHtml(transaction.suggested_category)} (${Math.round(transaction.confidence * 100)}%)` : 'No suggestion';
-        const sign = transaction.direction === 'debit' ? '-' : '+';
-        return `<tr><td>${escapeHtml(transaction.date)}</td><td>${escapeHtml(transaction.description)}</td><td>${escapeHtml(transaction.reference || '')}</td><td class="${transaction.direction === 'debit' ? 'money-out' : 'money-in'}">${sign} R${escapeHtml(transaction.amount)}</td><td>R${escapeHtml(transaction.balance_after)}</td><td>${suggestion}</td><td><select id="category-${transaction.id}">${blank}${options}</select> <button type="button" onclick="review(${transaction.id})">Save</button></td></tr>`;
-      }).join('') || '<tr><td colspan="7">Nothing waiting for review.</td></tr>';
+        const suggestion = transaction.suggested_category ? `${escapeHtml(transaction.suggested_category)} (${Math.round((transaction.confidence || 0) * 100)}% · ${escapeHtml(transaction.suggestion_method)})` : 'No trusted suggestion';
+        const sign = transaction.direction === 'debit' ? '−' : '+';
+        return `<tr><td>${escapeHtml(transaction.date)}</td><td>${escapeHtml(transaction.description)}</td><td>${escapeHtml(transaction.reference || '')}</td><td class="${transaction.direction === 'debit' ? 'money-out' : 'money-in'}">${sign} R${escapeHtml(transaction.amount)}</td><td>${suggestion}</td><td><select id="category-${transaction.id}">${blank}${options}</select> <button type="button" onclick="review(${transaction.id})">Save</button></td></tr>`;
+      }).join('') || '<tr><td colspan="6"><span class="good">Nothing waiting for review.</span></td></tr>';
     }
 
     async function loadPreview() {
       const year = Number(yearInput.value);
-      if (!year) return;
       const response = await fetch(`/cashbook/preview?year=${year}`);
       const data = await readJson(response);
-      if (!response.ok) { message.textContent = apiError(data, 'Could not load cashbook preview.'); return; }
+      if (!response.ok) { message.textContent = apiError(data, 'Could not load preview.'); return; }
       const summary = data.summary;
-      document.querySelector('#automation-summary').innerHTML = `<div class="summary-item"><strong>Transactions</strong><br>${summary.transaction_count}</div><div class="summary-item"><strong>Auto-approved</strong><br>${summary.auto_approved}</div><div class="summary-item"><strong>Manually approved</strong><br>${summary.manually_approved}</div><div class="summary-item"><strong>Corrected</strong><br>${summary.corrected}</div><div class="summary-item"><strong>Needs review</strong><br>${summary.pending}</div><div class="summary-item"><strong>Automation rule</strong><br>Exact ≥ ${Math.round(data.automation_policy.minimum_confidence * 100)}%, ${data.automation_policy.minimum_historical_hits}+ hits</div>`;
+      document.querySelector('#automation-summary').innerHTML = `
+        <div class="summary-item"><strong>Transactions</strong><br>${summary.transaction_count}</div>
+        <div class="summary-item"><strong>Auto-approved</strong><br>${summary.auto_approved}</div>
+        <div class="summary-item"><strong>Manual</strong><br>${summary.manually_approved + summary.corrected}</div>
+        <div class="summary-item"><strong>Needs review</strong><br>${summary.pending}</div>
+        <div class="summary-item"><strong>Written to cashbook</strong><br>${summary.cashbook_synced}</div>
+        <div class="summary-item"><strong>Needs sync</strong><br>${summary.cashbook_needs_sync}</div>
+        <div class="summary-item"><strong>Money in</strong><br>R${escapeHtml(summary.money_in)}</div>
+        <div class="summary-item"><strong>Money out</strong><br>R${escapeHtml(summary.money_out)}</div>`;
       document.querySelector('#preview-reconciliation').innerHTML = data.statements.map(item => `<div class="check"><strong>${escapeHtml(item.period_start)} → ${escapeHtml(item.period_end)}</strong><br>Opening R${escapeHtml(item.opening_balance)} + In R${escapeHtml(item.total_credits)} − Out R${escapeHtml(item.total_debits)} = Closing R${escapeHtml(item.closing_balance)}<br><span class="${item.reconciliation_status === 'passed' && Number(item.reconciliation_difference) === 0 ? 'good' : 'bad'}">${escapeHtml(item.reconciliation_status.toUpperCase())} · Difference R${escapeHtml(item.reconciliation_difference)}</span></div>`).join('') || '<div class="muted">No statements for this year.</div>';
-      document.querySelector('#allocation-preview').innerHTML = data.allocations.map(item => `<tr><td>${item.direction === 'debit' ? 'Payment' : 'Receipt'}</td><td>${escapeHtml(item.category_name)}</td><td>${escapeHtml(item.allocation_status.replaceAll('_', ' '))}</td><td>${item.transaction_count}</td><td>R${escapeHtml(item.total_amount)}</td><td>${escapeHtml(item.target_sheets.join(', '))}</td></tr>`).join('') || '<tr><td colspan="6">No allocations yet.</td></tr>';
+      document.querySelector('#allocation-preview').innerHTML = data.allocations.map(item => `<tr><td>${item.direction === 'debit' ? 'Payment' : 'Receipt'}</td><td>${escapeHtml(item.category_name)}</td><td>${escapeHtml(item.allocation_status.replaceAll('_',' '))}</td><td>${item.transaction_count}</td><td>R${escapeHtml(item.total_amount)}</td><td>${escapeHtml(item.target_sheets.join(', '))}</td></tr>`).join('') || '<tr><td colspan="6">No allocations yet.</td></tr>';
       document.querySelector('#cashbook-preview').innerHTML = data.rows.map(row => {
-        const requiredType = row.direction === 'debit' ? 'expense' : 'income';
-        const validCategories = categories.filter(category => category.type === requiredType);
-        const options = validCategories.map(category => `<option value="${category.id}" ${category.id === row.category_id ? 'selected' : ''}>${escapeHtml(category.name)}</option>`).join('');
+        const expectedType = row.direction === 'debit' ? 'expense' : 'income';
+        const options = categories.filter(category => category.type === expectedType).map(category => `<option value="${category.id}" ${category.id === row.category_id ? 'selected' : ''}>${escapeHtml(category.name)}</option>`).join('');
         const action = row.allocation_status === 'needs_review' ? '<span class="bad">Review above</span>' : `<select id="preview-category-${row.transaction_id}">${options}</select> <button type="button" onclick="updateAllocation(${row.transaction_id})">Update</button>`;
-        const statusClass = row.allocation_status === 'auto_approved' ? 'good' : (row.allocation_status === 'needs_review' ? 'bad' : '');
-        return `<tr><td>${escapeHtml(row.date)}</td><td>${escapeHtml(row.target_sheet)}</td><td>${escapeHtml(row.description)}</td><td class="${row.direction === 'debit' ? 'money-out' : 'money-in'}">${row.direction === 'debit' ? '-' : '+'} R${escapeHtml(row.amount)}</td><td>${escapeHtml(row.category_name || 'Unallocated')}</td><td class="${statusClass}">${escapeHtml(row.allocation_status.replaceAll('_', ' '))}${row.confidence != null ? `<br><span class="muted">${Math.round(row.confidence * 100)}%</span>` : ''}</td><td>${action}</td></tr>`;
-      }).join('') || '<tr><td colspan="7">No transactions for this year.</td></tr>';
-    }
-
-    async function updateAllocation(id) {
-      const categoryId = Number(document.querySelector(`#preview-category-${id}`).value);
-      if (!categoryId) return;
-      const response = await fetch(`/transactions/${id}/review`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({category_id:categoryId, learn:true})});
-      const data = await readJson(response);
-      if (!response.ok) { message.textContent = apiError(data); return; }
-      message.textContent = data.idempotent ? 'Allocation already saved.' : 'Cashbook allocation updated.';
-      await Promise.all([load(), loadPreview(), loadHistory()]);
+        const syncClass = row.sync_status === 'synced' ? 'good' : (row.sync_status === 'needs_sync' ? 'warn' : 'bad');
+        return `<tr><td>${escapeHtml(row.date)}</td><td>${escapeHtml(row.target_sheet)}</td><td>${escapeHtml(row.description)}</td><td class="${row.direction === 'debit' ? 'money-out' : 'money-in'}">R${escapeHtml(row.amount)}</td><td>${escapeHtml(row.category_name || 'Unallocated')}</td><td>${escapeHtml(row.allocation_status.replaceAll('_',' '))}</td><td class="${syncClass}">${escapeHtml(row.sync_status.replaceAll('_',' '))}</td><td>${action}</td></tr>`;
+      }).join('') || '<tr><td colspan="8">No transactions yet.</td></tr>';
     }
 
     async function loadHistory() {
-      const [importsResponse, auditResponse] = await Promise.all([fetch('/imports/history?limit=50'), fetch('/audit/history?limit=100')]);
-      const imports = await importsResponse.json(); const events = await auditResponse.json();
-      document.querySelector('#import-history').innerHTML = imports.map(item => `<tr><td>${escapeHtml(formatDateTime(item.uploaded_at))}</td><td>${escapeHtml(item.period_start)} → ${escapeHtml(item.period_end)}</td><td>${item.transactions_imported}/${item.source_transactions}<br><span class="muted">${item.duplicates_skipped} duplicate(s)</span></td><td>${item.pending} pending<br>${item.approved} approved<br>${item.corrected} corrected</td><td class="status-pass">${escapeHtml(item.reconciliation_status.toUpperCase())}<br><span class="muted">Δ R${escapeHtml(item.reconciliation_difference)}</span></td></tr>`).join('') || '<tr><td colspan="5">No imports yet.</td></tr>';
-      document.querySelector('#audit-history').innerHTML = events.map(event => `<tr><td>${escapeHtml(formatDateTime(event.created_at))}</td><td>${escapeHtml(event.event_type)}</td><td class="event-details">${escapeHtml(JSON.stringify(event.details))}</td></tr>`).join('') || '<tr><td colspan="3">No audit events yet.</td></tr>';
+      const [importsResponse, auditResponse] = await Promise.all([fetch('/imports/history?limit=20'), fetch('/audit/history?limit=30')]);
+      const imports = await readJson(importsResponse);
+      const audits = await readJson(auditResponse);
+      document.querySelector('#import-history').innerHTML = imports.map(item => `<tr><td>${escapeHtml(formatDateTime(item.uploaded_at))}</td><td>${escapeHtml(item.period_start)} → ${escapeHtml(item.period_end)}</td><td>${item.transactions_imported}/${item.source_transactions}<br><span class="muted">${item.duplicates_skipped} duplicate(s)</span></td><td>${item.pending} pending<br>${item.approved} approved<br>${item.corrected} corrected</td><td class="good">${escapeHtml(item.reconciliation_status.toUpperCase())}<br><span class="muted">Δ R${escapeHtml(item.reconciliation_difference)}</span></td></tr>`).join('') || '<tr><td colspan="5">No imports yet.</td></tr>';
+      document.querySelector('#audit-history').innerHTML = audits.map(item => `<tr><td>${escapeHtml(formatDateTime(item.created_at))}</td><td>${escapeHtml(item.event_type)}</td><td>${escapeHtml(item.entity_type || '')} ${escapeHtml(item.entity_id || '')}</td></tr>`).join('') || '<tr><td colspan="3">No audit events yet.</td></tr>';
     }
 
-    async function loadBackups() {
-      const response = await fetch('/backups'); const backups = await response.json();
-      document.querySelector('#backup-history').innerHTML = backups.map(item => `<tr><td>${escapeHtml(formatDateTime(item.modified_at))}</td><td>${formatBytes(item.size_bytes)}</td><td>${escapeHtml(item.filename)}</td><td><button type="button" class="danger" onclick="restoreBackup('${escapeHtml(item.filename)}')">Restore</button></td></tr>`).join('') || '<tr><td colspan="4">No backups yet.</td></tr>';
+    async function refreshAll() {
+      await Promise.all([loadCashbookStatus(), loadPending(), loadPreview(), loadHistory()]);
     }
 
     async function review(id) {
       const categoryId = Number(document.querySelector(`#category-${id}`).value);
       if (!categoryId) { message.textContent = 'Select a category before saving.'; return; }
-      const response = await fetch(`/transactions/${id}/review`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({category_id:categoryId, learn:true})});
+      const response = await fetch(`/transactions/${id}/review`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({category_id:categoryId,learn:true})});
       const data = await readJson(response);
       if (!response.ok) { message.textContent = apiError(data); return; }
-      message.textContent = data.idempotent ? 'Already saved.' : `Saved as ${data.status}.`;
-      await Promise.all([load(), loadPreview(), loadHistory()]);
+      const sync = data.cashbook_sync || {};
+      message.textContent = sync.status === 'needs_attention' ? `Classification saved, but the cashbook still needs attention: ${sync.message}` : 'Classification saved and cashbook synchronization checked.';
+      await refreshAll();
     }
 
-    async function prepareExport(kind) {
-      const year = Number(yearInput.value);
-      const response = await fetch(`/exports/summary?year=${year}`); const data = await readJson(response);
-      if (!response.ok) { message.textContent = apiError(data); return; }
-      const ready = kind === 'wced' ? data.ready_for_wced_export : data.ready_for_reviewed_export;
-      document.querySelector('#export-dialog-title').textContent = kind === 'wced' ? `Generate ${year} WCED cashbook?` : `Generate ${year} reviewed cashbook?`;
-      document.querySelector('#export-summary').innerHTML = `<div class="summary-grid"><div class="summary-item"><strong>Transactions</strong><br>${data.transaction_count}</div><div class="summary-item"><strong>Auto-approved</strong><br>${data.auto_approved}</div><div class="summary-item"><strong>Manual</strong><br>${data.manually_approved + data.corrected}</div><div class="summary-item"><strong>Pending</strong><br>${data.pending}</div><div class="summary-item"><strong>Statements</strong><br>${data.statement_count}</div><div class="summary-item"><strong>Money in</strong><br>R${escapeHtml(data.money_in)}</div><div class="summary-item"><strong>Money out</strong><br>R${escapeHtml(data.money_out)}</div><div class="summary-item"><strong>Reconciliation</strong><br><span class="${data.all_statements_reconciled ? 'good' : 'bad'}">${data.all_statements_reconciled ? 'PASSED' : 'NOT READY'}</span></div><div class="summary-item"><strong>Difference</strong><br>R${escapeHtml(data.reconciliation_difference)}</div></div>${kind === 'wced' && !data.wced_template_configured ? '<p class="bad">WCED template is not configured. Open Setup first.</p>' : ''}${ready ? '<p class="good">Ready to export.</p>' : '<p class="bad">Export is blocked until the items above are resolved.</p>'}`;
-      pendingExport = ready ? {kind, year} : null;
-      document.querySelector('#confirm-export').disabled = !ready;
-      exportDialog.showModal();
-    }
-
-    async function downloadFile(url) {
-      const response = await fetch(url);
-      if (!response.ok) { const data = await readJson(response); message.textContent = apiError(data, 'Export failed.'); return; }
-      const blob = await response.blob();
-      const disposition = response.headers.get('Content-Disposition') || '';
-      const match = disposition.match(/filename="?([^";]+)"?/i);
-      const filename = match ? match[1] : 'cashbook-export';
-      const objectUrl = URL.createObjectURL(blob); const anchor = document.createElement('a'); anchor.href = objectUrl; anchor.download = filename; document.body.appendChild(anchor); anchor.click(); anchor.remove(); URL.revokeObjectURL(objectUrl);
-      message.textContent = `${filename} generated successfully.`;
-      await loadHistory();
-    }
-
-    async function restoreBackup(filename) {
-      if (!confirm(`Restore ${filename}?\n\nYour current database will first be backed up automatically. The selected backup will then replace the current data.`)) return;
-      const response = await fetch(`/backups/${encodeURIComponent(filename)}/restore`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({confirm:true})});
+    async function updateAllocation(id) {
+      const categoryId = Number(document.querySelector(`#preview-category-${id}`).value);
+      const response = await fetch(`/transactions/${id}/review`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({category_id:categoryId,learn:true})});
       const data = await readJson(response);
-      if (!response.ok) { message.textContent = apiError(data, 'Restore failed.'); return; }
-      alert(`${data.message}\n\nSafety backup: ${data.safety_backup}`);
-      window.location.reload();
+      if (!response.ok) { message.textContent = apiError(data); return; }
+      message.textContent = data.cashbook_sync?.status === 'needs_attention' ? data.cashbook_sync.message : 'Allocation updated in the live cashbook.';
+      await refreshAll();
     }
+
+    document.querySelector('#cashbook-form').addEventListener('submit', async event => {
+      event.preventDefault();
+      const form = new FormData(event.target);
+      form.set('replace', form.get('replace') ? 'true' : 'false');
+      const response = await fetch('/cashbook/register', {method:'POST', body:form});
+      const data = await readJson(response);
+      message.textContent = response.ok ? `Live cashbook registered. ${data.sync.message}` : apiError(data);
+      if (response.ok) { event.target.reset(); await refreshAll(); }
+    });
 
     document.querySelector('#upload-form').addEventListener('submit', async event => {
-      event.preventDefault(); message.textContent = 'Importing and reconciling statement…'; reconciliation.textContent = '';
-      const response = await fetch('/statements/upload', {method:'POST', body:new FormData(event.target)}); const data = await readJson(response);
+      event.preventDefault();
+      const response = await fetch('/statements/upload', {method:'POST', body:new FormData(event.target)});
+      const data = await readJson(response);
       if (!response.ok) { message.textContent = apiError(data); return; }
-      message.textContent = `${data.transactions_imported} transaction(s) imported; ${data.auto_approved} auto-approved; ${data.pending_review} require review; ${data.duplicates_skipped} duplicate(s) skipped.`;
-      reconciliation.textContent = ['Reconciliation: PASSED', `Opening balance: R${data.reconciliation.opening_balance}`, `Money in: R${data.reconciliation.total_credits}`, `Money out: R${data.reconciliation.total_debits}`, `Closing balance: R${data.reconciliation.closing_balance}`, `Difference: R${data.reconciliation.difference}`].join('\n');
-      yearInput.value = Number(data.period.start.slice(0, 4)); event.target.reset(); await Promise.all([load(), loadPreview(), loadHistory(), loadBackups()]);
+      const sync = data.cashbook_sync || {};
+      message.textContent = `${data.transactions_imported} imported; ${data.auto_approved} auto-approved; ${data.pending_review} need review. Reconciliation passed. ${sync.message || ''}`;
+      document.querySelector('#reconciliation-summary').innerHTML = `<div class="summary-grid"><div class="summary-item"><strong>Opening</strong><br>R${escapeHtml(data.reconciliation.opening_balance)}</div><div class="summary-item"><strong>Money in</strong><br>R${escapeHtml(data.reconciliation.total_credits)}</div><div class="summary-item"><strong>Money out</strong><br>R${escapeHtml(data.reconciliation.total_debits)}</div><div class="summary-item"><strong>Closing</strong><br>R${escapeHtml(data.reconciliation.closing_balance)}</div><div class="summary-item"><strong>Difference</strong><br><span class="good">R${escapeHtml(data.reconciliation.difference)}</span></div></div>`;
+      yearInput.value = Number(data.period.start.slice(0,4));
+      event.target.reset();
+      await refreshAll();
     });
 
-    document.querySelector('#category-form').addEventListener('submit', async event => {
-      event.preventDefault(); const form = new FormData(event.target); const response = await fetch('/categories', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name:form.get('name'), type:form.get('type')})}); const data = await readJson(response);
-      message.textContent = response.ok ? `${data.name} added.` : apiError(data); if (response.ok) { event.target.reset(); await Promise.all([load(), loadHistory()]); }
+    document.querySelector('#sync-cashbook').addEventListener('click', async () => {
+      const response = await fetch('/cashbook/sync', {method:'POST'});
+      const data = await readJson(response);
+      message.textContent = response.ok ? `${data.message} Written ${data.written}; updated ${data.updated}; already synced ${data.already_synced}.` : apiError(data);
+      await refreshAll();
     });
 
-    document.querySelector('#template-form').addEventListener('submit', async event => {
-      event.preventDefault(); const form = new FormData(event.target); form.set('replace', form.get('replace') ? 'true' : 'false'); const response = await fetch('/setup/wced-template', {method:'POST', body:form}); const data = await readJson(response);
-      document.querySelector('#setup-message').textContent = response.ok ? 'WCED template saved successfully.' : apiError(data); if (response.ok) await loadSetup();
+    document.querySelector('#open-cashbook').addEventListener('click', async () => {
+      const response = await fetch('/cashbook/open', {method:'POST'});
+      const data = await readJson(response);
+      message.textContent = response.ok ? `Opened ${data.filename}.` : apiError(data);
     });
 
-    document.querySelector('#create-backup').addEventListener('click', async () => { const response = await fetch('/backups', {method:'POST'}); const data = await readJson(response); message.textContent = response.ok ? data.message : apiError(data); if (response.ok) await Promise.all([loadBackups(), loadHistory()]); });
-    document.querySelector('#refresh-backups').addEventListener('click', loadBackups);
-    document.querySelector('#refresh-history').addEventListener('click', loadHistory);
+    document.querySelector('#create-db-backup').addEventListener('click', async () => {
+      const response = await fetch('/backups', {method:'POST'});
+      const data = await readJson(response);
+      message.textContent = response.ok ? data.message : apiError(data);
+    });
+    document.querySelector('#refresh-review').addEventListener('click', loadPending);
     document.querySelector('#refresh-preview').addEventListener('click', loadPreview);
     yearInput.addEventListener('change', loadPreview);
-    document.querySelector('#open-setup').addEventListener('click', async () => { await loadSetup(); setupDialog.showModal(); });
-    document.querySelector('#close-setup').addEventListener('click', () => setupDialog.close());
-    document.querySelector('#reviewed-export').addEventListener('click', () => prepareExport('reviewed'));
-    document.querySelector('#wced-export').addEventListener('click', () => prepareExport('wced'));
-    document.querySelector('#cancel-export').addEventListener('click', () => { pendingExport = null; exportDialog.close(); });
-    document.querySelector('#confirm-export').addEventListener('click', async () => { if (!pendingExport) return; const {kind, year} = pendingExport; pendingExport = null; exportDialog.close(); const url = kind === 'wced' ? `/exports/wced-cashbook.xls?year=${year}` : `/exports/reviewed-cashbook.xlsx?year=${year}`; await downloadFile(url); });
 
-    yearInput.value = new Date().getFullYear();
-    Promise.all([loadHealth(), load(), loadPreview(), loadHistory(), loadBackups(), loadSetup({openWhenIncomplete:true})]).catch(error => { console.error(error); message.textContent = 'Could not load the cashbook. Open Help and download a support bundle if the problem continues.'; });
+    Promise.all([loadHealth(), refreshAll()]).catch(error => {
+      console.error(error);
+      message.textContent = 'Could not load the cashbook application. Open Help and download a support bundle if the problem continues.';
+    });
   </script>
 </body>
 </html>

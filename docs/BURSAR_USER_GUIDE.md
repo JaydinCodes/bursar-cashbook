@@ -1,66 +1,41 @@
 # Bursar Cashbook — Pilot User Guide
 
-## Start the application
+## What the application does
 
-1. Double-click `START CASHBOOK.bat`.
-2. Keep the black Cashbook window open while using the application.
-3. The Cashbook opens in the browser automatically.
+The application reads a Standard Bank statement, checks that the statement reconciles, classifies transactions, asks you only about uncertain classifications, and writes approved transactions directly into your registered cashbook workbook.
 
-If the application says setup is incomplete, run `SETUP CASHBOOK.bat` or contact support.
+There is no separate generated cashbook. The registered workbook is the live accounting file.
 
 ## First-time setup
 
-Open **Setup** in the top-right corner.
+1. Run `SETUP CASHBOOK.bat` if this is a new installation.
+2. Start the application with `START CASHBOOK.bat`.
+3. Under **Live cashbook**, register the existing `.xls` cashbook that you normally capture transactions into.
+4. The application checks the workbook structure and stores it as the active managed cashbook.
 
-All checks should show a green tick. If the WCED template is missing, upload the blank WCED `.xls` cashbook template supplied for the pilot.
+## Daily workflow
 
-Do not use a historical cashbook containing real captured entries as the blank export template.
+1. Make sure the live cashbook is closed in Excel.
+2. Export the statement from Standard Bank.
+3. Upload the statement under **Import Standard Bank statement**.
+4. The application validates the transaction rows and running balances.
+5. Trusted classifications are approved automatically and written into the live cashbook.
+6. Review only the transactions shown under **Exceptions requiring review**.
+7. Saving a review automatically writes that transaction into the live cashbook.
+8. Use **Open cashbook in Excel** when you want to inspect the result.
 
-## Import a Standard Bank statement
+## If the cashbook was open in Excel
 
-1. Download the statement from Standard Bank as CSV, XLS or XLSX.
-2. Under **Import statement**, choose the file.
-3. Click **Upload statement**.
-4. Wait for **Reconciliation: PASSED**.
+Windows may prevent the application from updating a workbook while Excel has it open. Your classification is still saved. Close Excel and click **Sync cashbook now**.
 
-If reconciliation fails, stop and contact support. Do not manually force the statement through.
+## Safety
 
-## Review exceptions
-
-Trusted historical matches are allocated automatically. The app only sends uncertain transactions to **Exceptions requiring review**.
-
-- Exact historical matches are auto-approved only when confidence is at least 95% with at least 3 prior occurrences.
-- Fuzzy matches and new descriptions always require review; income can auto-approve after enough consistent manual history exists.
-- Money out uses an **expense** category.
-- Money in uses an **income** category.
-- Review the suggested category and change it where necessary.
-
-Use **Cashbook preview** to see every transaction, the target PC/RC sheet and the category that will be written to Excel. An automatic allocation can still be corrected from the preview before export.
-
-## Generate a cashbook
-
-1. Choose the financial year.
-2. Select **Generate reviewed cashbook** or **Generate WCED cashbook**.
-3. Check the cashbook preview and confirmation summary.
-4. Confirm only when pending transactions are `0` and reconciliation has passed.
-5. The app reopens the generated WCED workbook and validates every written date, total and category allocation before the download is returned.
-
-During the pilot, compare the generated output with the normal manual cashbook process before treating it as final.
-
-## Backups
-
-The app automatically creates local backups before imports and restores. You can also click **Create backup now**.
-
-Only restore an older backup when you intentionally need to return to an earlier state. A safety backup of the current database is automatically created first.
+- The same bank transaction is not imported twice.
+- The same approved transaction is not written into the cashbook twice.
+- Corrections update the existing cashbook row instead of creating another row.
+- A cashbook backup is created before every live workbook write.
+- The application validates the cells it changed before replacing the live workbook.
 
 ## If something goes wrong
 
-If an error ID appears, for example:
-
-`ERR-20260831-12AB34CD`
-
-1. Copy or photograph the error ID.
-2. Click **Download support bundle**.
-3. Send the ZIP and error ID to the developer.
-
-The default support bundle does not include full transaction descriptions or bank references.
+Use **Support bundle** and send the downloaded diagnostic ZIP to the developer. If an Error ID is shown, include that ID as well.

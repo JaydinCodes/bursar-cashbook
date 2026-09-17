@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from .audit import audit_event_to_dict
 from .logging_config import LOG_FILE
-from .models import AuditEvent, Statement
+from .models import AuditEvent, CashbookProfile, CashbookSync, Statement
 from .version import APP_VERSION
 
 MAX_LOG_BYTES = 500_000
@@ -70,6 +70,28 @@ def build_diagnostics_zip(db: Session) -> bytes:
         .all()
     )
 
+    profile = (
+        db.query(CashbookProfile)
+        .filter(CashbookProfile.active.is_(True))
+        .order_by(CashbookProfile.id.desc())
+        .first()
+    )
+    cashbook = {
+        "registered": profile is not None,
+        "adapter": profile.adapter if profile else None,
+        "source_filename": profile.source_filename if profile else None,
+        "registered_at": (
+            profile.registered_at.isoformat() if profile and profile.registered_at else None
+        ),
+        "sync_record_count": (
+            db.query(CashbookSync)
+            .filter(CashbookSync.cashbook_profile_id == profile.id)
+            .count()
+            if profile
+            else 0
+        ),
+    }
+
     output = BytesIO()
     with ZipFile(output, "w", compression=ZIP_DEFLATED) as archive:
         archive.writestr(
@@ -79,6 +101,10 @@ def build_diagnostics_zip(db: Session) -> bytes:
         archive.writestr(
             "import-history.json",
             json.dumps([_statement_summary(item) for item in statements], indent=2),
+        )
+        archive.writestr(
+            "cashbook-status.json",
+            json.dumps(cashbook, indent=2, sort_keys=True),
         )
         archive.writestr(
             "audit-history.json",

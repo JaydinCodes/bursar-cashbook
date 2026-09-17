@@ -1,55 +1,45 @@
-# Developer Support Guide
+# Developer Support — Live Cashbook Model
 
-## Start locally
+## Phase 6 architecture
 
-```powershell
-.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
-```
+The registered workbook is the destination. Phase 6 no longer generates or downloads a new WCED cashbook.
 
-## Run tests
+Pipeline:
 
-```powershell
-python -m unittest discover -s tests -v
-```
+`Standard Bank statement -> parse -> reconcile -> classify -> approve/review -> live cashbook sync`
 
-## Important locations
+## Important files
 
-- Database: `cashbook.db`
-- Logs: `logs/cashbook.log`
-- Backups: `backups/`
-- Local WCED template: `config/wced-template.xls`
-- App version: `app/version.py` and `version.txt`
+- `app/bank_parser.py` — Standard Bank import adapter.
+- `app/reconciliation.py` — running-balance validation.
+- `app/automation.py` — trusted automatic classification policy.
+- `app/cashbook_sync.py` — live workbook inspection, registration, idempotent synchronization and correction.
+- `app/wced_export.py` — shared monthly PC/RC structure helpers and post-write validation. The download endpoints are retired.
 
-## Error IDs
+## Cashbook profiles
 
-Unexpected exceptions are assigned IDs such as `ERR-YYYYMMDD-XXXXXXXX`. Search `logs/cashbook.log` for the ID. The corresponding audit event is `application.error`.
+`cashbook_profiles` stores the registered workbook metadata and detected adapter. The current adapter is `monthly_pc_rc_v1`.
 
-## Support bundles
+Category names and their Excel columns are discovered from the actual workbook. The adapter currently expects the monthly PC/RC workbook family; future workbook families should be implemented as additional adapters rather than adding conditionals to the statement importer.
 
-The UI downloads `/diagnostics/export`. It contains runtime metadata, a log tail, import summaries and audit events. It intentionally excludes full transaction descriptions and bank references.
+## Synchronization ledger
 
-## Backup restore
+`cashbook_syncs` links a transaction to its exact workbook placement:
 
-The UI calls `POST /backups/{filename}/restore` with `{ "confirm": true }`.
+- cashbook profile
+- sheet name
+- row index
+- category column
+- category ID
 
-Before restoration, the application creates a `before-restore` backup. Restore is SQLite-only and validates the selected database with `PRAGMA integrity_check` plus required table checks.
+This is what prevents repeated syncs from duplicating transactions. If a classification changes after sync, the recorded row is validated and the category allocation is moved in place.
 
-## Updating the pilot installation
+## File safety
 
-1. Ask the bursar to close the app.
-2. Create a manual backup.
-3. Apply the tested patch/update.
-4. Run the full test suite.
-5. Start the app and check `/setup/status`.
-6. Confirm the displayed version changed.
+Before each workbook mutation, the live `.xls` file is copied to `cashbook_backups/`. The modified workbook is produced in memory, re-opened and validated, then atomically replaces the live file.
 
-Do not delete `cashbook.db` during Phase 3 updates unless intentionally rebuilding a test installation.
+If Excel locks the workbook on Windows, synchronization stops with a friendly error and can be retried after Excel is closed.
 
-## Version bump
+## Version
 
-Update both:
-
-- `app/version.py`
-- `version.txt`
-
-Keep support bundles and UI version labels aligned with the installed build.
+Phase 6: `0.6.0`.

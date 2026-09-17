@@ -1,4 +1,5 @@
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     Column,
     Date,
@@ -132,3 +133,63 @@ class AuditEvent(Base):
     entity_id = Column(Integer, nullable=True, index=True)
     details_json = Column(Text, nullable=False, default="{}")
     created_at = Column(DateTime, server_default=func.now(), nullable=False, index=True)
+
+
+class CashbookProfile(Base):
+    __tablename__ = "cashbook_profiles"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String, nullable=False, default="Active cashbook")
+    adapter = Column(String, nullable=False)
+    source_filename = Column(String, nullable=False)
+    file_path = Column(String, nullable=False)
+    file_hash = Column(String(64), nullable=False)
+    layout_json = Column(Text, nullable=False, default="{}")
+    active = Column(Boolean, nullable=False, default=True, index=True)
+    registered_at = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class CashbookSync(Base):
+    __tablename__ = "cashbook_syncs"
+    __table_args__ = (
+        UniqueConstraint(
+            "transaction_id",
+            "cashbook_profile_id",
+            name="uq_cashbook_sync_transaction_profile",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True)
+    transaction_id = Column(
+        Integer,
+        ForeignKey("transactions.id"),
+        nullable=False,
+        index=True,
+    )
+    cashbook_profile_id = Column(
+        Integer,
+        ForeignKey("cashbook_profiles.id"),
+        nullable=False,
+        index=True,
+    )
+    category_id = Column(Integer, ForeignKey("categories.id"), nullable=False)
+    sheet_name = Column(String, nullable=False)
+    row_index = Column(Integer, nullable=False)
+    category_column = Column(Integer, nullable=False)
+    synced_at = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    transaction = relationship("Transaction")
+    cashbook_profile = relationship("CashbookProfile")
+    category = relationship("Category")
