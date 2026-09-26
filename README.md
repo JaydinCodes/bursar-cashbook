@@ -1,87 +1,42 @@
-# Bursar Cashbook Automation
+# Bursar Cashbook
 
-Local Standard Bank prototype that reads bank statements and updates the bursar's existing Excel cashbook directly.
+Bursar Cashbook imports Standard Bank statements, reconciles them, helps the bursar classify exceptions, and safely synchronizes approved transactions to the existing WCED-style `.xls` cashbook.
 
-## Phase 6 workflow
+## Installed bursar application
 
-```text
-Standard Bank statement
-        ↓
-Parse transactions
-        ↓
-Validate debit / credit structure
-        ↓
-Reconcile running balances
-        ↓
-Deduplicate
-        ↓
-Classify
-        ↓
-Trusted exact match ──→ auto-approved
-Uncertain match       ──→ bursar review
-        ↓
-Live cashbook sync
-        ↓
-Existing registered .xls workbook is updated in place
-```
+The bursar does not need Python, a terminal, or a batch file.
 
-There is no generated/downloaded cashbook in Phase 6.
+1. Run `BursarCashbook-Setup.exe`.
+2. Open **Bursar Cashbook** from the Desktop or Start Menu.
+3. Register the current cashbook, import a Standard Bank statement, review exceptions, and open the cashbook in Excel.
+
+Application records are kept in `%LOCALAPPDATA%\\BursarCashbook`, not in Program Files. This includes the database, live cashbook, backups, logs, and configuration. Upgrades and normal uninstalls preserve these records.
+
+See [the bursar guide](docs/BURSAR_USER_GUIDE.md) and [Windows release checklist](docs/WINDOWS_RELEASE_CHECKLIST.md).
 
 ## Financial safety
 
-- Standard Bank statement validation and running-balance reconciliation.
-- Transaction fingerprinting prevents overlapping imports from duplicating bank transactions.
-- Trusted automatic classification requires an exact normalized match, at least 95% confidence and at least 3 historical hits.
-- Human review handles uncertain classifications.
-- `cashbook_syncs` records the exact workbook sheet, row and category column used for each synchronized transaction.
-- Retrying synchronization does not append a transaction twice.
-- Correcting a synchronized classification updates the existing row instead of adding another row.
-- The current workbook is backed up before every live write.
-- Modified workbook bytes are reopened and validated before replacing the live file.
-- If Excel locks the workbook, the accounting decision stays saved and the write can be retried safely.
+- Statement validation and running-balance reconciliation happen before import.
+- Transaction fingerprints prevent duplicate imports.
+- Only trusted exact matches are automatically approved; uncertain items require review.
+- A synchronization ledger prevents duplicate workbook rows and makes corrections update the original row.
+- The live workbook is backed up, validated, and safely replaced only after a successful write.
+- A locked Excel workbook fails safely and can be retried without losing the accounting decision.
 
-## Cashbook structure
+## Developer setup
 
-The first live adapter is `monthly_pc_rc_v1`. It supports the WCED-style monthly PC/RC workbook family while discovering category names and columns from the bursar's actual workbook.
+For development only, install Python dependencies and run the service as appropriate for your environment. The legacy `START CASHBOOK.bat` and `SETUP CASHBOOK.bat` remain developer/legacy workflows; they are not part of the installed application.
 
-This is deliberately adapter-based: a genuinely different cashbook family should be added as another cashbook adapter rather than changing statement parsing or classification logic.
-
-## Handover
-
-First time:
-
-```powershell
-SETUP CASHBOOK.bat
-```
-
-Normal use:
-
-```powershell
-START CASHBOOK.bat
-```
-
-Then:
-
-1. Register the bursar's existing `.xls` cashbook in the browser.
-2. Import a Standard Bank statement.
-3. Review only exceptions.
-4. Use **Open cashbook in Excel** to inspect the live file.
-
-## Tests
+Run tests:
 
 ```powershell
 python -m unittest discover -s tests -v
 ```
 
-The XLS integration tests use `data/2020_cashbook.xls` when the fixture and legacy XLS dependencies are available.
+Build a Windows release:
 
-## Upgrade from Phase 5
+```powershell
+./scripts/build_windows.ps1
+```
 
-Do **not** delete `cashbook.db` and do **not** reseed. Starting Phase 6 creates two new tables via SQLAlchemy `create_all()`:
-
-- `cashbook_profiles`
-- `cashbook_syncs`
-
-Existing categories, rules, statements, transactions, audit history and backups remain intact.
-
-After applying the patch, register the actual current cashbook. Existing approved/corrected transactions can then be synchronized into it once.
+See [Windows build instructions](docs/WINDOWS_BUILD.md) and [developer support notes](docs/DEVELOPER_SUPPORT.md).

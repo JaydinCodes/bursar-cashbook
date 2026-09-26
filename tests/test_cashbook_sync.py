@@ -10,7 +10,12 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app import cashbook_sync
-from app.cashbook_sync import cashbook_status, register_cashbook, sync_live_cashbook
+from app.cashbook_sync import (
+    _is_ready_for_cashbook,
+    cashbook_status,
+    register_cashbook,
+    sync_live_cashbook,
+)
 from app.models import Base, CashbookSync, Category, Statement, Transaction
 
 
@@ -125,6 +130,30 @@ class LiveCashbookStateTests(unittest.TestCase):
         self.assertEqual(status["eligible_transactions"], 1)
         self.assertEqual(status["needs_sync"], 1)
 
+    def test_pending_transaction_is_not_ready_for_cashbook(self):
+        transaction = Transaction(
+            status="pending",
+        )
+
+        self.assertFalse(
+            _is_ready_for_cashbook(transaction)
+        )
+    def test_approved_transaction_is_ready_for_cashbook(self):
+        transaction = Transaction(
+            status="approved",
+        )
+
+        self.assertTrue(
+            _is_ready_for_cashbook(transaction)
+        )
+    def test_corrected_transaction_is_ready_for_cashbook(self):
+        transaction = Transaction(
+            status="corrected",
+        )
+
+        self.assertTrue(
+            _is_ready_for_cashbook(transaction)
+        )
 
 @unittest.skipUnless(
     importlib.util.find_spec("xlrd") is not None

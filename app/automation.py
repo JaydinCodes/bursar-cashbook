@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
-from .categorize import normalize_payee
+from .merchant_identity import merchant_key
 from .models import Category, Rule
 
 AUTO_APPROVE_MIN_CONFIDENCE = 0.95
@@ -32,7 +32,7 @@ def trusted_exact_match(
     matches with strong historical consistency and enough prior observations.
     Fuzzy matches are never auto-approved.
     """
-    payee = normalize_payee(payee_raw)
+    payee = merchant_key(payee_raw)
     query = db.query(Rule).filter(Rule.payee_pattern == payee)
     if category_type is not None:
         query = query.join(Rule.category).filter(Category.type == category_type)

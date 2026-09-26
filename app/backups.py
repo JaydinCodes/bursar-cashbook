@@ -5,8 +5,9 @@ from datetime import datetime
 from pathlib import Path
 
 from sqlalchemy.engine import Engine
+from .config import DATABASE_BACKUP_DIR
 
-BACKUP_DIR = Path(os.getenv("CASHBOOK_BACKUP_DIR", "backups"))
+BACKUP_DIR = DATABASE_BACKUP_DIR
 BACKUP_RETENTION = max(1, int(os.getenv("CASHBOOK_BACKUP_RETENTION", "10")))
 BACKUP_NAME_RE = re.compile(r"^cashbook-\d{8}-\d{6}-\d{6}-[A-Za-z0-9_-]+\.db$")
 

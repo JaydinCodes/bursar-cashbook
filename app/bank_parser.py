@@ -3,10 +3,10 @@
 import csv
 import io
 import re
+
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
-
 from openpyxl import load_workbook
 
 DATE_HEADERS = ("transaction date", "date", "posting date")
@@ -47,6 +47,181 @@ class ParsedStatement:
     transactions: list[RawTransaction]
     explicit_opening_balance: Decimal | None = None
     explicit_closing_balance: Decimal | None = None
+
+
+def _parse_pdf(content: bytes) -> list[list[object]]:
+    import pdfplumber
+
+    rows = []
+    try:
+        with pdfplumber.open(io.BytesIO(content)) as pdf:
+            for page in pdf.pages:
+                tables = page.extract_tables()
+
+                for table in tables:
+                    for row in table:
+                        if row:
+                            rows.append(row)
+    except Exception as e:
+        raise StatementParseError(
+            "Could not read the PDF statement"
+        )
+
+    if not rows:
+        raise StatementParseError(
+            "No Transaction table could be extarcted from the pdf statement"
+        )
+
+    return rows
+
+
+PDF_DATE_RE = re.compile(
+    r"^(?P<date>\d{2} [A-Za-z]{3} \d{2})\s+"
+)
+
+PDF_TRANSACTION_RE = re.compile(
+    r"(?P<amount>[+-]?\d[\d,]*\.\d{2})\s+"
+    r"(?P<balance>[+-]?\d[\d,]*\.\d{2})$"
+)
+
+
+def _parse_pdf_transaction(
+    raw: str,
+    source_row: int,
+) -> list[object] | None:
+    """
+    Parse one Standard Bank PDF transaction row.
+
+    Returns:
+        [date, description, debit, credit, balance]
+
+    Example:
+        [
+            "01 Jul 26",
+            "WOOLWORTHS 5196*5110 30 JUN DEBIT CARD PURCHASE FROM",
+            "1350.00",
+            "",
+            "6629.34",
+        ]
+    """
+    if not raw:
+        return None
+
+    lines = [
+        line.strip()
+        for line in raw.splitlines()
+        if line.strip()
+    ]
+
+    if not lines:
+        return None
+
+    first_line = lines[0]
+
+    # Transaction rows must start with DD Mon YY.
+    date_match = PDF_DATE_RE.match(first_line)
+
+    if not date_match:
+        return None
+
+    txn_date = date_match.group("date")
+    remainder = first_line[date_match.end():].strip()
+
+    # The final two monetary values are:
+    # transaction amount + running balance.
+    money_match = PDF_TRANSACTION_RE.search(remainder)
+
+    if not money_match:
+        raise StatementParseError(
+            f"Could not parse Standard Bank PDF row {source_row}: "
+            f"{raw!r}"
+        )
+
+    amount_text = money_match.group("amount")
+    balance_text = money_match.group("balance")
+
+    description = remainder[:money_match.start()].strip()
+
+    # The second line contains useful transaction-type information.
+    if len(lines) > 1:
+        detail = " ".join(lines[1:])
+        description = f"{description} {detail}".strip()
+
+    amount = Decimal(amount_text.replace(",", ""))
+    balance = Decimal(balance_text.replace(",", ""))
+
+    if amount < 0:
+        debit = str(abs(amount))
+        credit = ""
+    else:
+        debit = ""
+        credit = str(amount)
+
+    return [
+        txn_date,
+        description,
+        debit,
+        credit,
+        str(balance),
+    ]
+def _normalize_pdf_rows(
+    rows: list[list[object]],
+) -> list[list[object]]:
+    """
+    Convert Standard Bank PDF rows into the structure
+    expected by parse_rows().
+    """
+    normalized: list[list[object]] =  [["Date", "Description", "Debit", "Credit", "Balance"]]
+
+    for source_row, row in enumerate(rows, start=1):
+        if not row:
+            continue
+
+        raw = str(row[0] or "").strip()
+
+        if not raw:
+            continue
+
+        # Ignore PDF table headers.
+        if raw.lower() == "date":
+            continue
+
+        # Opening balance.
+        opening_match = re.search(
+            r"STATEMENT OPENING BALANCE\s+"
+            r"([+-]?\d[\d,]*\.\d{2})",
+            raw,
+            re.IGNORECASE,
+        )
+
+        if opening_match:
+            normalized.append(
+                [
+                    "",
+                    "STATEMENT OPENING BALANCE",
+                    "",
+                    "",
+                    opening_match.group(1).replace(",", ""),
+                ]
+            )
+            continue
+
+        # Ignore summary rows such as:
+        # Payments -R26,073.80
+        # Deposits R26,595.57
+        if raw.lower().startswith(("payments ", "deposits ")):
+            continue
+
+        transaction = _parse_pdf_transaction(
+            raw,
+            source_row,
+        )
+
+        if transaction is not None:
+            normalized.append(transaction)
+
+    return normalized 
+    
 
 
 def _header(value: object) -> str:
@@ -152,9 +327,13 @@ def _parse_date(value: object, *, excel_datemode: int = 0) -> date:
         return value
 
     if isinstance(value, (int, float)) and value > 0:
-        return _excel_serial_to_date(float(value), excel_datemode)
+        return _excel_serial_to_date(
+            float(value),
+            excel_datemode,
+        )
 
     raw = str(value).strip()
+
     for fmt in (
         "%d/%m/%Y",
         "%d-%m-%Y",
@@ -163,13 +342,18 @@ def _parse_date(value: object, *, excel_datemode: int = 0) -> date:
         "%d/%m/%y",
         "%d %b %Y",
         "%d %B %Y",
+        "%d %b %y",       # Standard Bank PDF: 30 Jun 26
     ):
         try:
             return datetime.strptime(raw, fmt).date()
         except ValueError:
             continue
 
-    raise StatementParseError(f"Invalid transaction date: {raw!r}")
+    raise StatementParseError(
+        f"Invalid transaction date: {raw!r}"
+    )
+
+
 
 
 def parse_rows(
@@ -351,10 +535,13 @@ def parse_statement(
         excel_datemode = book.datemode
         sheet = book.sheet_by_index(0)
         rows = [sheet.row_values(index) for index in range(sheet.nrows)]
-
+    elif extension == "pdf":
+        rows = _parse_pdf(content)
+        rows = _normalize_pdf_rows(rows)
+        return parse_rows(rows)
     else:
         raise StatementParseError(
-            "Upload a Standard Bank CSV, XLS, or XLSX statement."
+            "Upload a Standard Bank CSV, XLS, PDF, or XLSX statement."
         )
 
     return parse_rows(rows, excel_datemode=excel_datemode)

@@ -1,4 +1,5 @@
 from datetime import date, datetime
+import json
 import os
 import subprocess
 import sys
@@ -29,6 +30,7 @@ from .config import (
     CASHBOOK_DIR,
     CONFIG_DIR,
     ensure_writable_directory,
+    resource_path,
 )
 from .categorize import (
     categorize,
@@ -41,7 +43,7 @@ from .diagnostics import build_diagnostics_zip
 from .errors import new_error_id
 from .fingerprints import standard_bank_transaction_fingerprint
 from .logging_config import LOG_DIR, logger
-from .models import AuditEvent, Category, Statement, Transaction
+from .models import AuditEvent, Category, Rule, Statement, Transaction
 from .reconciliation import StatementReconciliationError, reconcile_statement
 from .version import APP_VERSION
 from .wced_export import cashbook_target_sheet
@@ -53,12 +55,17 @@ from .cashbook_sync import (
     list_cashbook_backups,
     register_cashbook,
     sync_live_cashbook,
+    preview_live_cashbook_sync,
     sync_state_for_transactions,
+    sync_categories_from_layout,
+    sync_categories_from_active_cashbook,
 )
+from .presentation import display_payee, display_reference
+from .merchant_identity import merchant_key
 
 app = FastAPI(title="Bursar Cashbook Automation", version=APP_VERSION)
-REVIEW_PAGE = Path(__file__).parent / "static" / "review.html"
-HELP_PAGE = Path(__file__).parent / "static" / "help.html"
+REVIEW_PAGE = resource_path("app", "static", "review.html")
+HELP_PAGE = resource_path("app", "static", "help.html")
 FINAL_STATUSES = ("approved", "corrected")
 MAX_UPLOAD_BYTES = 15 * 1024 * 1024
 MAX_TEMPLATE_BYTES = 10 * 1024 * 1024
@@ -67,6 +74,7 @@ MAX_TEMPLATE_BYTES = 10 * 1024 * 1024
 class ReviewDecision(BaseModel):
     category_id: int
     learn: bool = True
+    apply_to_matches: bool = False
 
 
 class CategoryCreate(BaseModel):
@@ -250,7 +258,9 @@ def _cashbook_preview_item(transaction: Transaction) -> dict:
         "statement_id": transaction.statement_id,
         "date": transaction.txn_date.isoformat(),
         "description": transaction.payee_raw,
+        "payee_display": display_payee(transaction.payee_raw),
         "reference": transaction.reference,
+        "reference_display": display_reference(transaction.reference),
         "direction": transaction.direction,
         "amount": str(transaction.amount),
         "target_sheet": cashbook_target_sheet(transaction.txn_date, transaction.direction),
@@ -373,6 +383,11 @@ def _setup_status(db: Session) -> dict:
             and cashbook_dir_writable
             and cashbook_backup_writable
         ),
+        "readiness": (
+            "ready" if category_count > 0 and live["registered"] and backup_writable
+            and log_writable and config_writable and cashbook_dir_writable and cashbook_backup_writable
+            else "setup_required" if not live["registered"] else "needs_attention"
+        ),
         "checks": checks,
     }
 
@@ -408,6 +423,9 @@ async def register_live_cashbook(
         )
     except CashbookSyncError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    category_sync = sync_categories_from_layout(db, layout)
+    db.commit()
 
     try:
         sync_result = sync_live_cashbook(db)
@@ -454,12 +472,22 @@ async def register_live_cashbook(
             "receipt_category_count": len(layout["receipt_categories"]),
         },
         "sync": sync_result,
+        "categories": category_sync,
     }
 
 
 @app.get("/cashbook/status")
 def live_cashbook_status(db: Session = Depends(get_db)):
     return cashbook_status(db)
+
+
+@app.post("/categories/refresh")
+def refresh_categories_from_cashbook(db: Session = Depends(get_db)):
+    try:
+        result = sync_categories_from_active_cashbook(db)
+    except CashbookSyncError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return result
 
 
 @app.get("/cashbook/backups")
@@ -469,6 +497,11 @@ def live_cashbook_backups():
 
 @app.post("/cashbook/sync")
 def sync_cashbook_now(db: Session = Depends(get_db)):
+    if get_active_cashbook(db) is None:
+        raise HTTPException(
+            status_code=409,
+            detail="No cashbook is connected. Connect a cashbook first.",
+        )
     try:
         result = sync_live_cashbook(db)
     except CashbookSyncError as exc:
@@ -483,15 +516,35 @@ def sync_cashbook_now(db: Session = Depends(get_db)):
         details=result,
     )
     db.commit()
-    logger.info("live_cashbook_synced", extra=result)
+    logger.info(
+        "live_cashbook_synced",
+        extra={
+            "sync_status": result.get("status"),
+            "sync_message": result.get("message"),
+            "transactions_written": result.get("written", 0),
+            "transactions_updated": result.get("updated", 0),
+            "transactions_already_synced": result.get("already_synced", 0),
+        },
+    )
     return {**result, "cashbook": cashbook_status(db)}
+
+
+@app.get("/cashbook/sync-preview")
+def cashbook_sync_preview(db: Session = Depends(get_db)):
+    try:
+        return preview_live_cashbook_sync(db)
+    except CashbookSyncError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.post("/cashbook/open")
 def open_live_cashbook(db: Session = Depends(get_db)):
     profile = get_active_cashbook(db)
     if profile is None:
-        raise HTTPException(status_code=404, detail="No live cashbook is registered.")
+        raise HTTPException(
+            status_code=409,
+            detail="No cashbook is connected. Connect a cashbook first.",
+        )
     path = Path(profile.file_path)
     if not path.is_file():
         raise HTTPException(status_code=404, detail="The registered cashbook file is missing.")
@@ -969,6 +1022,7 @@ async def upload_statement(
             txn_date=raw.txn_date,
             payee_raw=raw.description,
             payee_normalized=normalize_payee(raw.description),
+            merchant_key=merchant_key(raw.description),
             reference=raw.reference,
             balance_after=raw.balance_after,
             amount=raw.amount,
@@ -1068,49 +1122,97 @@ async def upload_statement(
     }
 
 
-@app.get("/transactions/pending")
-def pending_transactions(db: Session = Depends(get_db)):
-    transactions = (
-        db.query(Transaction)
-        .filter(Transaction.status == "pending")
-        .order_by(
-            Transaction.suggestion_confidence.asc().nullsfirst(),
-            Transaction.txn_date.desc(),
-            Transaction.id.desc(),
+def _transaction_review_item(transaction: Transaction, matching_count: int = 0) -> dict:
+    historical_hits = 0
+    if transaction.suggested_category_id is not None:
+        rule = (
+            transaction._sa_instance_state.session.query(Rule)
+            .filter(Rule.payee_pattern == transaction.merchant_key)
+            .filter(Rule.category_id == transaction.suggested_category_id)
+            .first()
         )
-        .all()
-    )
-
-    return [
-        {
+        historical_hits = rule.hit_count if rule else 0
+    return {
             "id": transaction.id,
             "date": transaction.txn_date.isoformat(),
+            # Keep these presentation aliases while the desktop shell is updated.
+            "txn_date": transaction.txn_date.isoformat(),
             "description": transaction.payee_raw,
+            "payee_raw": transaction.payee_raw,
+            "payee_display": display_payee(transaction.payee_raw),
+            "merchant_key": transaction.merchant_key,
             "reference": transaction.reference,
+            "reference_display": display_reference(transaction.reference),
             "amount": str(transaction.amount),
             "direction": transaction.direction,
             "balance_after": str(transaction.balance_after),
             "suggested_category_id": transaction.suggested_category_id,
-            "suggested_category": (
-                transaction.suggested_category.name
-                if transaction.suggested_category
-                else None
-            ),
-            "confidence": (
-                float(transaction.suggestion_confidence)
-                if transaction.suggestion_confidence is not None
-                else None
-            ),
+            "suggested_category": transaction.suggested_category.name if transaction.suggested_category else None,
+            "suggested_category_name": transaction.suggested_category.name if transaction.suggested_category else None,
+            "category": transaction.category.name if transaction.category else None,
+            "category_id": transaction.category_id,
+            "status": transaction.status,
+            "matching_pending_count": matching_count,
+            "confidence": float(transaction.suggestion_confidence) if transaction.suggestion_confidence is not None else None,
             "suggestion_method": transaction.suggestion_method,
+            "historical_hit_count": historical_hits,
         }
-        for transaction in transactions
-    ]
+
+
+@app.get("/transactions/pending")
+def pending_transactions(
+    page: int | None = Query(None, ge=1),
+    page_size: int = Query(25, ge=25, le=100),
+    search: str | None = Query(None, max_length=200),
+    status: str = Query("needs_classification"),
+    db: Session = Depends(get_db),
+):
+    query = db.query(Transaction)
+    if status == "suggested":
+        query = query.filter(
+            Transaction.status == "pending",
+            Transaction.suggested_category_id.is_not(None),
+        )
+    elif status in {"all", "needs_classification"}:
+        query = query.filter(Transaction.status == "pending")
+    elif status == "reviewed":
+        query = query.filter(Transaction.status.in_(FINAL_STATUSES))
+    else:
+        raise HTTPException(status_code=422, detail="Invalid transaction filter.")
+    if search and search.strip():
+        term = f"%{search.strip()}%"
+        query = query.outerjoin(Transaction.category).filter(
+            (Transaction.payee_raw.ilike(term)) | (Transaction.reference.ilike(term)) | (Category.name.ilike(term))
+        )
+    query = query.order_by(Transaction.suggestion_confidence.asc().nullsfirst(), Transaction.txn_date.desc(), Transaction.id.desc())
+    if page is None:  # Legacy API response retained for existing integrations.
+        transactions = query.all()
+        return [_transaction_review_item(item) for item in transactions]
+    total = query.count()
+    transactions = query.offset((page - 1) * page_size).limit(page_size).all()
+    items = []
+    for transaction in transactions:
+        matches = db.query(Transaction.id).filter(
+            Transaction.status == "pending",
+            Transaction.merchant_key == transaction.merchant_key,
+            Transaction.direction == transaction.direction,
+        ).count() - 1
+        items.append(_transaction_review_item(transaction, max(0, matches)))
+    return {"transactions": items, "page": page, "page_size": page_size,
+            "total": total, "page_count": max(1, (total + page_size - 1) // page_size)}
 
 
 @app.get("/categories")
 def categories(db: Session = Depends(get_db)):
+    profile = get_active_cashbook(db)
+    layout = json.loads(profile.layout_json) if profile else {}
+    linked = {
+        *( (name, "expense") for name in layout.get("payment_categories", []) ),
+        *( (name, "income") for name in layout.get("receipt_categories", []) ),
+    }
     return [
-        {"id": category.id, "name": category.name, "type": category.type}
+        {"id": category.id, "name": category.name, "type": category.type,
+         "linked_to_cashbook": (category.name, category.type) in linked}
         for category in db.query(Category).order_by(Category.type, Category.name).all()
     ]
 
@@ -1176,6 +1278,32 @@ def review_transaction(
                 f"{expected_type} category."
             ),
         )
+
+    if decision.apply_to_matches:
+        if transaction.status != "pending":
+            raise HTTPException(status_code=409, detail="Bulk review is available only for a pending transaction.")
+        matching_ids = [
+            row[0] for row in db.query(Transaction.id).filter(
+                Transaction.status == "pending",
+                Transaction.merchant_key == transaction.merchant_key,
+                Transaction.direction == transaction.direction,
+            ).order_by(Transaction.id).all()
+        ]
+        # Direction is deliberately part of the match: an identical merchant
+        # must never bulk-classify both income and expense transactions.
+        results = []
+        for matching_id in matching_ids:
+            results.append(review_transaction(
+                matching_id,
+                ReviewDecision(category_id=decision.category_id, learn=decision.learn),
+                db,
+            ))
+        return {
+            "transaction_id": transaction_id,
+            "bulk": True,
+            "reviewed_count": len(results),
+            "cashbook_sync": results[-1]["cashbook_sync"] if results else None,
+        }
 
     previous_category_id = transaction.category_id
     previous_status = transaction.status

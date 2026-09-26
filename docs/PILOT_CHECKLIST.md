@@ -1,4 +1,7 @@
-# Phase 6 Pilot Checklist
+# Installed Application Pilot Checklist
+
+- [ ] Install `BursarCashbook-Setup.exe` and open **Bursar Cashbook** from the Desktop shortcut.
+- [ ] Confirm the browser opens automatically and no terminal window is shown.
 
 - [ ] Register a copy of the bursar's actual current cashbook.
 - [ ] Confirm all monthly PC and RC sheets are detected.

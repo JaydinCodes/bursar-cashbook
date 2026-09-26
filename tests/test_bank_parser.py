@@ -14,7 +14,7 @@ class BankParserTests(unittest.TestCase):
             "02/08/2026,School fees,,250.00,1250.00\n"
         ).encode()
 
-        transactions = parse_statement("statement.csv", content)
+        transactions = parse_statement("statement.csv", content).transactions
 
         self.assertEqual(len(transactions), 2)
         self.assertEqual(transactions[0].direction, "debit")
@@ -22,26 +22,25 @@ class BankParserTests(unittest.TestCase):
         self.assertEqual(transactions[1].direction, "credit")
 
     def test_parses_signed_amount_csv(self):
-        content = "Date,Details,Amount\n2026-08-01,Vendor,-42.25\n".encode()
+        content = "Date,Details,Amount,Balance\n2026-08-01,Vendor,-42.25,957.75\n".encode()
 
-        transaction = parse_statement("statement.csv", content)[0]
+        transaction = parse_statement("statement.csv", content).transactions[0]
 
         self.assertEqual(transaction.direction, "debit")
         self.assertEqual(transaction.amount, Decimal("42.25"))
 
-    def test_nedbank_profile_accepts_transaction_details_column(self):
+    def test_rejects_non_standard_bank_profile(self):
         content = "Date,Transaction Details,Debits,Credits\n01/08/2026,Vendor,42.25,\n".encode()
 
-        transaction = parse_statement("statement.csv", content, bank="Nedbank")[0]
-
-        self.assertEqual(transaction.description, "Vendor")
+        with self.assertRaises(Exception):
+            parse_statement("statement.csv", content, bank="Nedbank")
 
     def test_standard_bank_business_csv_fixture(self):
         transactions = parse_statement(
             "standard_bank_business_csv_v1.csv",
             (self.fixture_dir / "standard_bank_business_csv_v1.csv").read_bytes(),
             bank="Standard Bank",
-        )
+        ).transactions
 
         self.assertEqual(len(transactions), 4)
         self.assertEqual(transactions[0].direction, "debit")

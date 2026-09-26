@@ -11,8 +11,12 @@ logs/
 backups/
 exports/
 data/private/
+data/*.pdf
 scripts/node_modules/
 *.db-journal
+build/
+dist/
+release/
 config/*.xls
 cashbooks/*.xls
 cashbook_backups/

@@ -1,41 +1,28 @@
-# Bursar Cashbook — Pilot User Guide
+# Bursar Cashbook User Guide
 
-## What the application does
+## First time
 
-The application reads a Standard Bank statement, checks that the statement reconciles, classifies transactions, asks you only about uncertain classifications, and writes approved transactions directly into your registered cashbook workbook.
-
-There is no separate generated cashbook. The registered workbook is the live accounting file.
-
-## First-time setup
-
-1. Run `SETUP CASHBOOK.bat` if this is a new installation.
-2. Start the application with `START CASHBOOK.bat`.
-3. Under **Live cashbook**, register the existing `.xls` cashbook that you normally capture transactions into.
-4. The application checks the workbook structure and stores it as the active managed cashbook.
+1. Open **Bursar Cashbook** from the Desktop or Start Menu.
+2. Follow the on-screen setup guide: connect the current WCED `.xls` cashbook, then import a Standard Bank statement when one is available.
+3. The application confirms the connected file and its cashbook layout before it can be synchronized.
+4. Keep a normal school backup of the original cashbook as well.
 
 ## Daily workflow
 
-1. Make sure the live cashbook is closed in Excel.
-2. Export the statement from Standard Bank.
-3. Upload the statement under **Import Standard Bank statement**.
-4. The application validates the transaction rows and running balances.
-5. Trusted classifications are approved automatically and written into the live cashbook.
-6. Review only the transactions shown under **Exceptions requiring review**.
-7. Saving a review automatically writes that transaction into the live cashbook.
-8. Use **Open cashbook in Excel** when you want to inspect the result.
+1. Open **Bursar Cashbook** from the desktop.
+2. Close the cashbook in Excel before synchronizing it.
+3. Select **Import statement** from Overview or Transactions and choose your Standard Bank statement.
+4. Open **Transactions** and review any items that need a category.
+5. Open **Cashbook**, select **Sync now**, then select **Open in Excel** to inspect the updated live cashbook.
 
-## If the cashbook was open in Excel
+The application checks that the statement reconciles before importing it. It does not import a transaction twice, and it does not write an approved transaction twice.
 
-Windows may prevent the application from updating a workbook while Excel has it open. Your classification is still saved. Close Excel and click **Sync cashbook now**.
+## If Excel says the cashbook is open
 
-## Safety
+Your classification is still saved. Close the workbook in Excel and select **Sync cashbook now**. The application will retry safely.
 
-- The same bank transaction is not imported twice.
-- The same approved transaction is not written into the cashbook twice.
-- Corrections update the existing cashbook row instead of creating another row.
-- A cashbook backup is created before every live workbook write.
-- The application validates the cells it changed before replacing the live workbook.
+## Safety and support
 
-## If something goes wrong
+A cashbook backup is made before every workbook update. If something goes wrong, use **Support bundle** and send the downloaded file to support. Include any Error ID shown on screen.
 
-Use **Support bundle** and send the downloaded diagnostic ZIP to the developer. If an Error ID is shown, include that ID as well.
+Your Bursar Cashbook records, cashbook, backups, logs, and settings are kept on this computer even if the application is uninstalled. Ask support before manually deleting them.

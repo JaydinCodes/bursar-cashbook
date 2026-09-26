@@ -1,0 +1,2 @@
+# Build-machine dependency; this is not required by the installed application.
+pyinstaller>=6.0,<7.0

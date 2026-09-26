@@ -1,4 +1,5 @@
 """Write classified transactions into the monthly WCED legacy XLS cashbook."""
+from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
@@ -24,6 +25,81 @@ MONTH_SHEET_NAMES = {
 
 class WcedExportError(ValueError):
     pass
+
+
+@dataclass(frozen=True)
+class WcedSheetLayout:
+    """Explicit, validated capture mapping for one monthly PC/RC sheet."""
+    sheet_name: str
+    direction: str
+    start_row: int
+    date_column: int
+    payee_column: int | None
+    reference_column: int | None
+    total_column: int
+    category_columns: dict[str, int]
+
+    @property
+    def occupancy_columns(self) -> tuple[int, ...]:
+        return tuple(column for column in (self.date_column, self.payee_column, self.reference_column, self.total_column) if column is not None)
+
+
+def discover_sheet_layout(sheet, direction: str) -> WcedSheetLayout:
+    """Discover a supported WCED monthly capture sheet or fail closed."""
+    if direction not in {"debit", "credit"}:
+        raise WcedExportError(f"Unsupported transaction direction: {direction!r}.")
+    labels = [str(sheet.cell_value(4, column)).strip().upper() for column in range(sheet.ncols)]
+    def required(label: str) -> int:
+        matches = [column for column, value in enumerate(labels) if value == label]
+        if len(matches) != 1:
+            friendly = "Total Payments" if direction == "debit" and label == "TOTAL AMOUNT" else label.title()
+            raise WcedExportError(f"Could not safely determine the {friendly} column in {sheet.name}.")
+        return matches[0]
+    date_column = required("DAY")
+    total_column = required("TOTAL AMOUNT")
+    if direction == "debit":
+        payee_column = required("DETAILS")
+        categories = {name: column for column, name in pc_column_categories(sheet).items()}
+        return WcedSheetLayout(sheet.name, direction, 6, date_column, payee_column, None, total_column, categories)
+    reference_column = required("DEPOSIT NUMBER")
+    # The receipt cashbook's "From" field is the appropriate payee field.
+    from_columns = [column for column, value in enumerate(labels) if value == "RECEIPT NUMBERS"]
+    payee_column = from_columns[0] if len(from_columns) == 1 else None
+    categories = rc_column_categories(sheet)
+    return WcedSheetLayout(sheet.name, direction, 7, date_column, payee_column, reference_column, total_column, categories)
+
+
+def first_empty_capture_row(sheet, layout: WcedSheetLayout) -> int:
+    for row in range(layout.start_row, sheet.nrows):
+        first_cell = str(sheet.cell_value(row, layout.date_column)).strip().lower()
+        if first_cell.startswith("total "):
+            break
+        if all(not str(sheet.cell_value(row, column)).strip() or sheet.cell_value(row, column) == 0 for column in layout.occupancy_columns):
+            return row
+    raise WcedExportError(f"No empty capture rows remain in {sheet.name}.")
+
+
+def build_cashbook_placement(transaction, category_name: str, layout: WcedSheetLayout, row: int) -> WcedPlacement:
+    """Pure, observable placement plan used before a workbook is written."""
+    category_column = layout.category_columns.get(category_name)
+    if category_column is None:
+        raise WcedExportError(f"{category_name} is not available in {layout.sheet_name}. Review category mapping.")
+    return WcedPlacement(
+        transaction_id=transaction.id,
+        txn_date=transaction.txn_date,
+        description=transaction.payee_raw,
+        amount=transaction.amount,
+        direction=transaction.direction,
+        category_name=category_name,
+        sheet_name=layout.sheet_name,
+        row=row,
+        category_column=category_column,
+        date_column=layout.date_column,
+        payee_column=layout.payee_column,
+        reference_column=layout.reference_column,
+        total_column=layout.total_column,
+        reference=transaction.reference,
+    )
 
 
 def _is_real_label(value: str) -> bool:
@@ -76,6 +152,11 @@ class WcedPlacement:
     sheet_name: str
     row: int
     category_column: int
+    date_column: int = 0
+    payee_column: int | None = None
+    reference_column: int | None = None
+    total_column: int = 0
+    reference: str | None = None
 
 
 @dataclass(frozen=True)
@@ -204,7 +285,7 @@ def build_wced_cashbook(
             writable_sheet.write(row, 3, amount)
         else:
             writable_sheet.write(row, 0, transaction.txn_date.day)
-            writable_sheet.write(row, 3, f"IMPORT/{transaction.transaction_id}")
+            writable_sheet.write(row, 1, transaction.description)
             writable_sheet.write(row, 4, amount)
 
         writable_sheet.write(row, category_column, amount)
@@ -219,6 +300,11 @@ def build_wced_cashbook(
                 sheet_name=sheet_name,
                 row=row,
                 category_column=category_column,
+                date_column=0,
+                payee_column=2 if suffix == "PC" else 1,
+                reference_column=3 if suffix == "RC" else None,
+                total_column=3 if suffix == "PC" else 4,
+                reference=None,
             )
         )
         next_rows[sheet_name] += 1
@@ -246,6 +332,8 @@ def _same_money(actual: object, expected: Decimal) -> bool:
 def validate_wced_cashbook(
     content: bytes,
     placements: tuple[WcedPlacement, ...] | list[WcedPlacement],
+    *,
+    expected_sheet_names: tuple[str, ...] | list[str] | None = None,
 ) -> None:
     """Re-open the generated workbook and verify every intended cell placement."""
     try:
@@ -260,6 +348,9 @@ def validate_wced_cashbook(
     except Exception as exc:
         raise WcedExportError("Generated WCED workbook could not be reopened for validation.") from exc
 
+    if expected_sheet_names is not None and tuple(workbook.sheet_names()) != tuple(expected_sheet_names):
+        raise WcedExportError("Final export validation failed: workbook sheet structure changed.")
+
     for placement in placements:
         try:
             sheet = workbook.sheet_by_name(placement.sheet_name)
@@ -268,13 +359,12 @@ def validate_wced_cashbook(
                 f"Final export validation failed: missing sheet {placement.sheet_name}."
             ) from exc
 
-        if sheet.cell_value(placement.row, 0) != float(placement.txn_date.day):
+        if sheet.cell_value(placement.row, placement.date_column) != float(placement.txn_date.day):
             raise WcedExportError(
                 f"Final export validation failed for transaction {placement.transaction_id}: date was not written correctly."
             )
 
-        total_column = 3 if placement.direction == "debit" else 4
-        if not _same_money(sheet.cell_value(placement.row, total_column), placement.amount):
+        if not _same_money(sheet.cell_value(placement.row, placement.total_column), placement.amount):
             raise WcedExportError(
                 f"Final export validation failed for transaction {placement.transaction_id}: total amount mismatch."
             )
@@ -287,15 +377,14 @@ def validate_wced_cashbook(
                 f"Final export validation failed for transaction {placement.transaction_id}: category allocation mismatch."
             )
 
-        if placement.direction == "debit":
-            actual_description = str(sheet.cell_value(placement.row, 2))
+        if placement.payee_column is not None:
+            actual_description = str(sheet.cell_value(placement.row, placement.payee_column))
             if actual_description != placement.description:
                 raise WcedExportError(
                     f"Final export validation failed for transaction {placement.transaction_id}: description mismatch."
                 )
-        else:
-            expected_reference = f"IMPORT/{placement.transaction_id}"
-            if str(sheet.cell_value(placement.row, 3)) != expected_reference:
+        if placement.reference_column is not None and placement.reference:
+            if str(sheet.cell_value(placement.row, placement.reference_column)) != placement.reference:
                 raise WcedExportError(
                     f"Final export validation failed for transaction {placement.transaction_id}: receipt reference mismatch."
                 )

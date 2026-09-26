@@ -23,8 +23,8 @@ from .wced_export import (
     WcedExportError,
     WcedPlacement,
     cashbook_target_sheet,
-    pc_column_categories,
-    rc_column_categories,
+    discover_sheet_layout,
+    first_empty_capture_row,
     validate_wced_cashbook,
 )
 
@@ -36,6 +36,9 @@ CASHBOOK_BACKUP_RETENTION = 20
 class CashbookSyncError(ValueError):
     pass
 
+
+def _is_ready_for_cashbook(transaction: Transaction) -> bool:
+    return transaction.status in {"approved", "corrected"}
 
 def _require_xls_dependencies():
     try:
@@ -97,15 +100,13 @@ def inspect_cashbook(content: bytes) -> dict:
     for sheet_name in sorted(required):
         sheet = workbook.sheet_by_name(sheet_name)
         if sheet_name.endswith(" PC"):
-            categories = {
-                name: column for column, name in pc_column_categories(sheet).items()
-            }
+            mapping = discover_sheet_layout(sheet, "debit")
+            categories = mapping.category_columns
             payment_categories.update(categories)
-            start_row = 6
         else:
-            categories = rc_column_categories(sheet)
+            mapping = discover_sheet_layout(sheet, "credit")
+            categories = mapping.category_columns
             receipt_categories.update(categories)
-            start_row = 7
 
         if not categories:
             raise CashbookSyncError(
@@ -113,7 +114,11 @@ def inspect_cashbook(content: bytes) -> dict:
             )
 
         sheets[sheet_name] = {
-            "start_row": start_row,
+            "start_row": mapping.start_row,
+            "date_column": mapping.date_column,
+            "payee_column": mapping.payee_column,
+            "reference_column": mapping.reference_column,
+            "total_column": mapping.total_column,
             "category_count": len(categories),
             "categories": categories,
         }
@@ -134,6 +139,37 @@ def get_active_cashbook(db: Session) -> CashbookProfile | None:
         .order_by(CashbookProfile.id.desc())
         .first()
     )
+
+
+def sync_categories_from_layout(db: Session, layout: dict) -> dict:
+    """Upsert workbook categories without removing existing learned categories."""
+    created = existing = 0
+    for category_type, names in (("expense", layout.get("payment_categories", [])),
+                                 ("income", layout.get("receipt_categories", []))):
+        for raw_name in names:
+            name = str(raw_name).strip()
+            if not name:
+                continue
+            if db.query(Category).filter_by(name=name, type=category_type).first() is None:
+                db.add(Category(name=name, type=category_type))
+                created += 1
+            else:
+                existing += 1
+    db.flush()
+    return {"created": created, "existing": existing}
+
+
+def sync_categories_from_active_cashbook(db: Session) -> dict:
+    profile = get_active_cashbook(db)
+    if profile is None:
+        raise CashbookSyncError("Register a live cashbook before refreshing categories.")
+    try:
+        layout = json.loads(profile.layout_json)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise CashbookSyncError("The registered cashbook category layout is invalid.") from exc
+    result = sync_categories_from_layout(db, layout)
+    db.commit()
+    return result
 
 
 def register_cashbook(
@@ -228,29 +264,22 @@ def _same_money(actual: object, expected: Decimal) -> bool:
         return False
 
 
-def _validate_existing_synced_row(sheet, sync: CashbookSync, transaction: Transaction) -> None:
+def _validate_existing_synced_row(sheet, sync: CashbookSync, transaction: Transaction, layout) -> None:
     row = sync.row_index
     if row >= sheet.nrows:
         raise CashbookSyncError(
             f"The cashbook row for transaction {transaction.id} no longer exists. "
             "The workbook appears to have been structurally edited."
         )
-    if sheet.cell_value(row, 0) != float(transaction.txn_date.day):
+    if sheet.cell_value(row, layout.date_column) != float(transaction.txn_date.day):
         raise CashbookSyncError(
             f"Transaction {transaction.id} moved in the cashbook. Automatic correction was stopped."
         )
-    total_column = 3 if transaction.direction == "debit" else 4
-    if not _same_money(sheet.cell_value(row, total_column), transaction.amount):
+    if not _same_money(sheet.cell_value(row, layout.total_column), transaction.amount):
         raise CashbookSyncError(
             f"Transaction {transaction.id} no longer matches its recorded cashbook row. "
             "Automatic correction was stopped."
         )
-
-
-def _category_columns(sheet, direction: str) -> dict[str, int]:
-    if direction == "debit":
-        return {name: column for column, name in pc_column_categories(sheet).items()}
-    return rc_column_categories(sheet)
 
 
 def _current_category(db: Session, transaction: Transaction) -> Category:
@@ -274,16 +303,15 @@ def _current_category(db: Session, transaction: Transaction) -> Category:
     return category
 
 
-def _write_new_transaction(writable_sheet, row: int, transaction: Transaction) -> None:
+def _write_new_transaction(writable_sheet, row: int, transaction: Transaction, layout) -> None:
     amount = float(transaction.amount)
-    if transaction.direction == "debit":
-        writable_sheet.write(row, 0, transaction.txn_date.day)
-        writable_sheet.write(row, 2, transaction.payee_raw)
-        writable_sheet.write(row, 3, amount)
-    else:
-        writable_sheet.write(row, 0, transaction.txn_date.day)
-        writable_sheet.write(row, 3, f"IMPORT/{transaction.id}")
-        writable_sheet.write(row, 4, amount)
+    writable_sheet.write(row, layout.date_column, transaction.txn_date.day)
+    if layout.payee_column is not None:
+        writable_sheet.write(row, layout.payee_column, transaction.payee_raw)
+    # A blank reference is intentionally left blank; no synthetic IMPORT/id is used.
+    if layout.reference_column is not None and transaction.reference:
+        writable_sheet.write(row, layout.reference_column, transaction.reference)
+    writable_sheet.write(row, layout.total_column, amount)
 
 
 def _eligible_transactions(db: Session, transaction_ids: list[int] | None) -> list[Transaction]:
@@ -297,6 +325,42 @@ def _eligible_transactions(db: Session, transaction_ids: list[int] | None) -> li
             return []
         query = query.filter(Transaction.id.in_(transaction_ids))
     return query.order_by(Transaction.txn_date, Transaction.id).all()
+
+
+def preview_live_cashbook_sync(db: Session) -> dict:
+    """Build a non-mutating, fail-closed final sync plan."""
+    profile = get_active_cashbook(db)
+    if profile is None:
+        raise CashbookSyncError("No cashbook is connected. Connect a cashbook first.")
+    xlrd, _ = _require_xls_dependencies()
+    try:
+        source = xlrd.open_workbook(str(profile.file_path), formatting_info=True)
+    except Exception as exc:
+        raise CashbookSyncError("The registered cashbook could not be opened.") from exc
+    rows, blocked, next_rows = [], [], {}
+    for transaction in _eligible_transactions(db, None):
+        try:
+            category = _current_category(db, transaction)
+            sheet_name = cashbook_target_sheet(transaction.txn_date, transaction.direction)
+            sheet = source.sheet_by_name(sheet_name)
+            layout = discover_sheet_layout(sheet, transaction.direction)
+            if category.name not in layout.category_columns:
+                raise CashbookSyncError(f"{category.name} is not available in {sheet_name}. Review category mapping.")
+            if sheet_name not in next_rows:
+                next_rows[sheet_name] = first_empty_capture_row(sheet, layout)
+            rows.append({"transaction_id": transaction.id, "date": transaction.txn_date.isoformat(),
+                         "payee": transaction.payee_raw, "amount": str(transaction.amount),
+                         "direction": transaction.direction, "sheet_name": sheet_name,
+                         "category": category.name, "row_index": next_rows[sheet_name]})
+            next_rows[sheet_name] += 1
+        except (CashbookSyncError, WcedExportError, Exception) as exc:
+            blocked.append({"transaction_id": transaction.id, "reason": str(exc)})
+    summary: dict[str, dict] = {}
+    for row in rows:
+        item = summary.setdefault(row["sheet_name"], {"sheet_name": row["sheet_name"], "transaction_count": 0, "amount": Decimal("0")})
+        item["transaction_count"] += 1; item["amount"] += Decimal(row["amount"])
+    return {"ready": not blocked, "transactions": rows, "blocked": blocked,
+            "summary": [{**value, "amount": f'{value["amount"]:.2f}'} for value in summary.values()]}
 
 
 def sync_live_cashbook(
@@ -362,6 +426,11 @@ def sync_live_cashbook(
     already_synced = 0
 
     for transaction in transactions:
+        if not _is_ready_for_cashbook(transaction):
+            raise CashbookSyncError(
+                f"Transaction {transaction.id} is not approved for cashbook sync."
+            )
+
         category = _current_category(db, transaction)
 
         sheet_name = cashbook_target_sheet(transaction.txn_date, transaction.direction)
@@ -370,8 +439,11 @@ def sync_live_cashbook(
         except Exception as exc:
             raise CashbookSyncError(f"The registered cashbook is missing {sheet_name}.") from exc
 
-        category_columns = _category_columns(source_sheet, transaction.direction)
-        category_column = category_columns.get(category.name)
+        try:
+            layout = discover_sheet_layout(source_sheet, transaction.direction)
+        except WcedExportError as exc:
+            raise CashbookSyncError(str(exc)) from exc
+        category_column = layout.category_columns.get(category.name)
         if category_column is None:
             raise CashbookSyncError(
                 f"Category {category.name!r} is not present in {sheet_name}. "
@@ -387,7 +459,7 @@ def sync_live_cashbook(
                     f"Transaction {transaction.id} would move to another cashbook sheet. "
                     "Automatic synchronization was stopped."
                 )
-            _validate_existing_synced_row(source_sheet, existing, transaction)
+            _validate_existing_synced_row(source_sheet, existing, transaction, layout)
             if existing.category_id == transaction.category_id:
                 already_synced += 1
                 continue
@@ -406,6 +478,11 @@ def sync_live_cashbook(
                     sheet_name=sheet_name,
                     row=existing.row_index,
                     category_column=category_column,
+                    date_column=layout.date_column,
+                    payee_column=layout.payee_column,
+                    reference_column=layout.reference_column,
+                    total_column=layout.total_column,
+                    reference=transaction.reference,
                 )
             )
             updated_syncs.append((existing, category_column))
@@ -413,14 +490,13 @@ def sync_live_cashbook(
             continue
 
         if sheet_name not in next_rows:
-            next_rows[sheet_name] = _first_empty_row(
-                source_sheet,
-                6 if transaction.direction == "debit" else 7,
-                (0, 2, 3) if transaction.direction == "debit" else (0, 3, 4),
-            )
+            try:
+                next_rows[sheet_name] = first_empty_capture_row(source_sheet, layout)
+            except WcedExportError as exc:
+                raise CashbookSyncError(str(exc)) from exc
 
         row = next_rows[sheet_name]
-        _write_new_transaction(writable_sheet, row, transaction)
+        _write_new_transaction(writable_sheet, row, transaction, layout)
         writable_sheet.write(row, category_column, float(transaction.amount))
         placements.append(
             WcedPlacement(
@@ -433,6 +509,11 @@ def sync_live_cashbook(
                 sheet_name=sheet_name,
                 row=row,
                 category_column=category_column,
+                date_column=layout.date_column,
+                payee_column=layout.payee_column,
+                reference_column=layout.reference_column,
+                total_column=layout.total_column,
+                reference=transaction.reference,
             )
         )
         new_syncs.append((transaction, sheet_name, row, category_column))
@@ -454,7 +535,7 @@ def sync_live_cashbook(
     writable.save(output)
     content = output.getvalue()
     try:
-        validate_wced_cashbook(content, placements)
+        validate_wced_cashbook(content, placements, expected_sheet_names=source.sheet_names())
     except WcedExportError as exc:
         raise CashbookSyncError(str(exc)) from exc
 

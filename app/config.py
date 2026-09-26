@@ -1,18 +1,59 @@
+"""Application locations shared by development and the packaged Windows app.
+
+Mutable accounting records never belong beside the executable. Set
+``CASHBOOK_APP_DATA_DIR`` to isolate a developer or test run.
+"""
+
+from __future__ import annotations
+
 import os
+import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-CONFIG_DIR = Path(os.getenv("CASHBOOK_CONFIG_DIR", PROJECT_ROOT / "config"))
-CASHBOOK_DIR = Path(os.getenv("CASHBOOK_LIVE_DIR", PROJECT_ROOT / "cashbooks"))
-CASHBOOK_BACKUP_DIR = Path(
-    os.getenv("CASHBOOK_FILE_BACKUP_DIR", PROJECT_ROOT / "cashbook_backups")
-)
+APP_NAME = "BursarCashbook"
+
+
+def _default_app_data_dir() -> Path:
+    override = os.getenv("CASHBOOK_APP_DATA_DIR")
+    if override:
+        return Path(override).expanduser()
+    # ``python -m unittest discover`` must never create a real user's AppData
+    # files merely because FastAPI's startup hook is exercised by TestClient.
+    if "unittest" in sys.modules:
+        import tempfile
+        return Path(tempfile.gettempdir()) / f"BursarCashbook-tests-{os.getpid()}"
+    if os.name == "nt":
+        return Path(os.getenv("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / APP_NAME
+    return Path(os.getenv("XDG_DATA_HOME", Path.home() / ".local" / "share")) / APP_NAME
+
+
+APP_DATA_DIR = _default_app_data_dir().resolve()
+DATA_DIR = APP_DATA_DIR / "data"
+DATABASE_PATH = DATA_DIR / "cashbook.db"
+CONFIG_DIR = Path(os.getenv("CASHBOOK_CONFIG_DIR", APP_DATA_DIR / "config")).expanduser().resolve()
+CASHBOOK_DIR = Path(os.getenv("CASHBOOK_LIVE_DIR", APP_DATA_DIR / "cashbooks")).expanduser().resolve()
+CASHBOOK_BACKUP_DIR = Path(os.getenv("CASHBOOK_FILE_BACKUP_DIR", APP_DATA_DIR / "cashbook_backups")).expanduser().resolve()
+DATABASE_BACKUP_DIR = Path(os.getenv("CASHBOOK_BACKUP_DIR", APP_DATA_DIR / "database_backups")).expanduser().resolve()
+LOG_DIR = Path(os.getenv("CASHBOOK_LOG_DIR", APP_DATA_DIR / "logs")).expanduser().resolve()
 DEFAULT_ACTIVE_CASHBOOK = CASHBOOK_DIR / "active-cashbook.xls"
 
 # Kept only so older installations fail gracefully instead of losing the
 # previously configured file. Phase 6 no longer generates a workbook from a
 # blank template; the registered live cashbook is the destination itself.
 DEFAULT_WCED_TEMPLATE = CONFIG_DIR / "wced-template.xls"
+
+
+def ensure_application_directories() -> None:
+    """Create persistent folders without creating or reseeding data files."""
+    for path in (APP_DATA_DIR, DATA_DIR, CONFIG_DIR, CASHBOOK_DIR,
+                 CASHBOOK_BACKUP_DIR, DATABASE_BACKUP_DIR, LOG_DIR):
+        path.mkdir(parents=True, exist_ok=True)
+
+
+def resource_path(*parts: str) -> Path:
+    """Find read-only resources in a PyInstaller bundle or source checkout."""
+    return Path(getattr(sys, "_MEIPASS", PROJECT_ROOT)).joinpath(*parts)
 
 
 def get_wced_template_path() -> Path | None:

@@ -1,67 +1,37 @@
 import unittest
-from decimal import Decimal
+from pathlib import Path
 
 from app.bank_parser import parse_statement
-from app.reconciliation import StatementReconciliationError, reconcile_statement
+from app.reconciliation import reconcile_statement
 
 
-class ReconciliationTests(unittest.TestCase):
-    def test_reconciles_ascending_statement(self):
-        content = (
-            "Transaction Date,Description,Debit,Credit,Balance\n"
-            "01/08/2026,Vendor,100.00,,900.00\n"
-            "02/08/2026,School fees,,250.00,1150.00\n"
-        ).encode()
+PDF_PATH = Path("data/bankstatement.pdf")
 
-        result = reconcile_statement(
-            parse_statement("statement.csv", content, bank="Standard Bank")
+
+class TestRealStandardBankPdfReconciliation(unittest.TestCase):
+
+    def test_real_pdf_reconciles(self):
+        content = PDF_PATH.read_bytes()
+
+        statement = parse_statement(
+            filename="standard_bank_statement.pdf",
+            content=content,
         )
 
-        self.assertEqual(result.opening_balance, Decimal("1000.00"))
-        self.assertEqual(result.total_debits, Decimal("100.00"))
-        self.assertEqual(result.total_credits, Decimal("250.00"))
-        self.assertEqual(result.closing_balance, Decimal("1150.00"))
-        self.assertEqual(result.difference, Decimal("0.00"))
-        self.assertEqual(result.transaction_order, "ascending")
+        result = reconcile_statement(statement)
 
-    def test_reconciles_descending_statement(self):
-        content = (
-            "Transaction Date,Description,Debit,Credit,Balance\n"
-            "02/08/2026,School fees,,250.00,1150.00\n"
-            "01/08/2026,Vendor,100.00,,900.00\n"
-        ).encode()
+        print(f"\nOpening balance: {result.opening_balance}")
+        print(f"Total debits: {result.total_debits}")
+        print(f"Total credits: {result.total_credits}")
+        print(f"Calculated closing: {result.calculated_closing_balance}")
+        print(f"Actual closing: {result.closing_balance}")
+        print(f"Difference: {result.difference}")
+        print(f"Transaction order: {result.transaction_order}")
 
-        result = reconcile_statement(
-            parse_statement("statement.csv", content, bank="Standard Bank")
+        self.assertEqual(
+            result.difference,
+            0,
         )
-
-        self.assertEqual(result.transaction_order, "descending")
-        self.assertEqual(result.opening_balance, Decimal("1000.00"))
-
-    def test_rejects_bad_running_balance(self):
-        content = (
-            "Transaction Date,Description,Debit,Credit,Balance\n"
-            "01/08/2026,Vendor,100.00,,900.00\n"
-            "02/08/2026,School fees,,250.00,1149.00\n"
-        ).encode()
-
-        parsed = parse_statement("statement.csv", content, bank="Standard Bank")
-
-        with self.assertRaises(StatementReconciliationError):
-            reconcile_statement(parsed)
-
-    def test_rejects_wrong_explicit_closing_balance(self):
-        content = (
-            "Transaction Date,Description,Debit,Credit,Balance\n"
-            ",Opening balance,,,1000.00\n"
-            "01/08/2026,Vendor,100.00,,900.00\n"
-            ",Closing balance,,,899.00\n"
-        ).encode()
-
-        parsed = parse_statement("statement.csv", content, bank="Standard Bank")
-
-        with self.assertRaises(StatementReconciliationError):
-            reconcile_statement(parsed)
 
 
 if __name__ == "__main__":

@@ -40,6 +40,19 @@ Before each workbook mutation, the live `.xls` file is copied to `cashbook_backu
 
 If Excel locks the workbook on Windows, synchronization stops with a friendly error and can be retried after Excel is closed.
 
+## Windows installed application
+
+Phase 7 keeps mutable data under `%LOCALAPPDATA%\\BursarCashbook` (or `CASHBOOK_APP_DATA_DIR` for a developer/test override):
+
+- `data/cashbook.db`
+- `cashbooks/active-cashbook.xls`
+- `cashbook_backups/`
+- `database_backups/`
+- `logs/`
+- `config/`
+
+The executable is installed under Program Files and is disposable. Do not reseed an existing database. `app/launcher.py` owns the loopback-only Uvicorn lifecycle, and its failures are recorded in `logs/cashbook.log`.
+
 ## Version
 
-Phase 6: `0.6.0`.
+Phase 7: `0.7.0`.

@@ -104,6 +104,7 @@ class Transaction(Base):
     txn_date = Column(Date, nullable=False, index=True)
     payee_raw = Column(String, nullable=False)
     payee_normalized = Column(String, nullable=False, index=True)
+    merchant_key = Column(String, nullable=True, index=True)
     reference = Column(String, nullable=True)
     balance_after = Column(Numeric(16, 2), nullable=False)
 

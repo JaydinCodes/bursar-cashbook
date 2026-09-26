@@ -4,8 +4,9 @@ import os
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from .config import LOG_DIR as CONFIG_LOG_DIR
 
-LOG_DIR = Path(os.getenv("CASHBOOK_LOG_DIR", "logs"))
+LOG_DIR = CONFIG_LOG_DIR
 LOG_FILE = LOG_DIR / "cashbook.log"
 
 

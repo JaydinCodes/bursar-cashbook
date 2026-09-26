@@ -89,7 +89,8 @@ class WcedExportTests(unittest.TestCase):
         sheet = workbook.sheet_by_name("Jan RC")
         row = 17
         self.assertEqual(sheet.cell_value(row, 0), 31.0)
-        self.assertEqual(sheet.cell_value(row, 3), "IMPORT/901")
+        self.assertEqual(sheet.cell_value(row, 1), "TEST RECEIPT")
+        self.assertEqual(sheet.cell_value(row, 3), "")
         self.assertEqual(sheet.cell_value(row, 4), 250.00)
         self.assertEqual(sheet.cell_value(row, 26), 250.00)
 
