@@ -27,6 +27,7 @@ from .wced_export import (
     first_empty_capture_row,
     validate_wced_cashbook,
 )
+from .workbook_inspector import inspect_workbook
 
 ADAPTER_NAME = "monthly_pc_rc_v1"
 FINAL_STATUSES = ("approved", "corrected")
@@ -80,6 +81,10 @@ def inspect_cashbook(content: bytes) -> dict:
     except Exception as exc:
         raise CashbookSyncError("The selected cashbook is not a readable legacy .xls workbook.") from exc
 
+    try:
+        schema = inspect_workbook(content)
+    except Exception as exc:
+        raise CashbookSyncError("The selected cashbook structure could not be inspected safely.") from exc
     month_names = (
         "Jan", "Feb", "Mar", "April", "May", "June",
         "July", "Aug", "Sept", "Oct", "Nov", "Dec",
@@ -129,6 +134,8 @@ def inspect_cashbook(content: bytes) -> dict:
         "sheets": sheets,
         "payment_categories": sorted(payment_categories),
         "receipt_categories": sorted(receipt_categories),
+        "schema_fingerprint": schema["schema_fingerprint"],
+        "schema": schema,
     }
 
 
@@ -391,6 +398,16 @@ def sync_live_cashbook(
             "The registered cashbook file is missing. Restore it from a cashbook backup."
         )
 
+    try:
+        stored_layout = json.loads(profile.layout_json)
+        current_schema = inspect_workbook(path)
+    except Exception as exc:
+        raise CashbookSyncError("The registered cashbook structure could not be inspected safely.") from exc
+    if stored_layout.get("schema_fingerprint") and current_schema["schema_fingerprint"] != stored_layout["schema_fingerprint"]:
+        raise CashbookSyncError(
+            "The cashbook structure has changed since it was connected. Review the workbook mapping before syncing."
+        )
+
     transactions = _eligible_transactions(db, transaction_ids)
     if not transactions:
         return {
@@ -573,6 +590,12 @@ def sync_live_cashbook(
             sync.category_column = category_column
 
         profile.file_hash = sha256(content).hexdigest()
+        # xlutils can normalize some BIFF metadata while preserving the
+        # validated capture cells. Store the post-write verified schema so a
+        # later sync does not mistake our own safe replacement for an edit.
+        updated_layout = json.loads(profile.layout_json)
+        updated_layout["schema_fingerprint"] = inspect_workbook(content)["schema_fingerprint"]
+        profile.layout_json = json.dumps(updated_layout, separators=(",", ":"), sort_keys=True)
         profile.updated_at = datetime.now().astimezone().replace(tzinfo=None)
         db.commit()
     except Exception:

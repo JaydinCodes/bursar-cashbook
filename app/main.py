@@ -61,6 +61,7 @@ from .cashbook_sync import (
     sync_categories_from_active_cashbook,
 )
 from .presentation import display_payee, display_reference
+from .workbook_inspector import inspect_workbook
 from .merchant_identity import merchant_key
 
 app = FastAPI(title="Bursar Cashbook Automation", version=APP_VERSION)
@@ -479,6 +480,17 @@ async def register_live_cashbook(
 @app.get("/cashbook/status")
 def live_cashbook_status(db: Session = Depends(get_db)):
     return cashbook_status(db)
+
+
+@app.get("/cashbook/structure-report")
+def cashbook_structure_report(db: Session = Depends(get_db)):
+    profile = get_active_cashbook(db)
+    if profile is None:
+        raise HTTPException(status_code=409, detail="No cashbook is connected. Connect a cashbook first.")
+    try:
+        return inspect_workbook(profile.file_path, profile.source_filename)
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail="The cashbook structure report could not be generated.") from exc
 
 
 @app.post("/categories/refresh")
