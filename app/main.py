@@ -903,6 +903,32 @@ def reset_workspace(db: Session = Depends(get_db)):
     return {"status": "reset", **counts}
 
 
+@app.get("/learning/status")
+def learning_status(db: Session = Depends(get_db)):
+    """Return the local category-learning summary without bank transaction data."""
+    rules = (
+        db.query(Rule)
+        .join(Rule.category)
+        .order_by(Rule.hit_count.desc(), Rule.updated_at.desc(), Rule.id.desc())
+        .all()
+    )
+    return {
+        "enabled": True,
+        "patterns": len(rules),
+        "examples": sum(rule.hit_count for rule in rules),
+        "recent_patterns": [
+            {
+                "merchant": rule.payee_pattern,
+                "category": rule.category.name,
+                "direction": rule.category.type,
+                "examples": rule.hit_count,
+                "confidence": float(rule.confidence),
+            }
+            for rule in rules[:8]
+        ],
+    }
+
+
 @app.get("/audit/history")
 def audit_history(
     limit: int = Query(100, ge=1, le=500),

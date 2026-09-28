@@ -17,7 +17,7 @@ from app import backups
 from app.diagnostics import build_diagnostics_zip
 from app.errors import new_error_id
 from app.main import app, get_db
-from app.models import AuditEvent, Base, Statement, Transaction
+from app.models import AuditEvent, Base, Category, Rule, Statement, Transaction
 from app.version import APP_VERSION
 
 
@@ -62,6 +62,29 @@ class SupportabilityApiTests(unittest.TestCase):
         response = self.client.get("/health")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["version"], APP_VERSION)
+
+    def test_learning_status_reports_local_rule_summary(self):
+        db = self.session_factory()
+        try:
+            category = Category(name="Stationery", type="expense")
+            db.add(category)
+            db.flush()
+            db.add(
+                Rule(
+                    payee_pattern="SCHOOL SUPPLIER",
+                    category_id=category.id,
+                    hit_count=3,
+                    confidence=1,
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        response = self.client.get("/learning/status")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["examples"], 3)
+        self.assertEqual(response.json()["recent_patterns"][0]["category"], "Stationery")
 
     def test_import_history_and_audit_history_track_state(self):
         statement_id = self._import_statement()
