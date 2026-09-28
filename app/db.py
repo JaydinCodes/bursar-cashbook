@@ -35,6 +35,128 @@ SessionLocal = sessionmaker(
 )
 
 
+def _rule_narrative(value: object) -> str | None:
+    """Return a meaningful learned narrative without changing its wording."""
+    if value is None:
+        return None
+    narrative = str(value).strip()
+    return narrative or None
+
+
+def _migrate_legacy_rules(connection, text) -> None:
+    """Re-key only legacy rules, preserving learning data in place.
+
+    Older releases keyed rules by the full bank wording.  New releases use a
+    stable merchant key.  Unlike the original migration, this never rebuilds
+    the entire table: canonical rules remain untouched and only legacy groups
+    are merged.  A group with conflicting narratives is intentionally left
+    unchanged so a bursar's wording is never selected arbitrarily.
+    """
+    rules = [
+        dict(row._mapping)
+        for row in connection.execute(
+            text(
+                "SELECT id, payee_pattern, category_id, hit_count, confidence, "
+                "cashbook_narrative FROM rules ORDER BY id"
+            )
+        )
+    ]
+    if not rules:
+        return
+
+    keyed_rules: list[dict] = []
+    legacy_keys: set[str] = set()
+    for rule in rules:
+        key = merchant_key(rule["payee_pattern"])
+        if not key:
+            # A non-empty payee_pattern should always have a merchant key, but
+            # preserving an unexpected legacy value is safer than discarding it.
+            continue
+        rule["merchant_key"] = key
+        keyed_rules.append(rule)
+        if rule["payee_pattern"] != key:
+            legacy_keys.add(key)
+
+    migrated_rules = 0
+    skipped_conflicts = 0
+    for key in sorted(legacy_keys):
+        key_rules = [rule for rule in keyed_rules if rule["merchant_key"] == key]
+        by_category: dict[int, list[dict]] = {}
+        for rule in key_rules:
+            by_category.setdefault(rule["category_id"], []).append(rule)
+
+        conflicting_categories = []
+        for category_id, category_rules in by_category.items():
+            narratives = {
+                narrative
+                for narrative in (_rule_narrative(rule["cashbook_narrative"]) for rule in category_rules)
+                if narrative is not None
+            }
+            if len(narratives) > 1:
+                conflicting_categories.append(category_id)
+
+        if conflicting_categories:
+            skipped_conflicts += 1
+            logging.getLogger("cashbook").warning(
+                "merchant_rule_migration_conflict_skipped",
+                extra={
+                    "merchant_key": key,
+                    "category_ids": conflicting_categories,
+                    "rule_count": len(key_rules),
+                },
+            )
+            continue
+
+        total_hits = sum(int(rule["hit_count"] or 0) for rule in key_rules)
+        # Delete duplicate rows first, then update the surviving row in place.
+        # This avoids uniqueness collisions while retaining a stable rule id.
+        migrations: list[tuple[dict, int, str | None]] = []
+        for category_id, category_rules in by_category.items():
+            canonical = next(
+                (rule for rule in category_rules if rule["payee_pattern"] == key),
+                category_rules[0],
+            )
+            for duplicate in category_rules:
+                if duplicate["id"] != canonical["id"]:
+                    connection.execute(text("DELETE FROM rules WHERE id=:id"), {"id": duplicate["id"]})
+            narrative = next(
+                (
+                    _rule_narrative(rule["cashbook_narrative"])
+                    for rule in category_rules
+                    if _rule_narrative(rule["cashbook_narrative"]) is not None
+                ),
+                None,
+            )
+            hits = sum(int(rule["hit_count"] or 0) for rule in category_rules)
+            migrations.append((canonical, hits, narrative))
+
+        for canonical, hits, narrative in migrations:
+            connection.execute(
+                text(
+                    "UPDATE rules SET payee_pattern=:key, hit_count=:hits, "
+                    "confidence=:confidence, cashbook_narrative=:narrative "
+                    "WHERE id=:id"
+                ),
+                {
+                    "id": canonical["id"],
+                    "key": key,
+                    "hits": hits,
+                    "confidence": hits / total_hits if total_hits else 0,
+                    "narrative": narrative,
+                },
+            )
+        migrated_rules += len(migrations)
+
+    if migrated_rules or skipped_conflicts:
+        logging.getLogger("cashbook").info(
+            "merchant_rule_migration_completed",
+            extra={
+                "merchant_rule_count": migrated_rules,
+                "merchant_keys_skipped_for_narrative_conflict": skipped_conflicts,
+            },
+        )
+
+
 def init_db() -> None:
     Base.metadata.create_all(bind=engine)
     # SQLite's create_all does not add columns to an installed database.
@@ -56,25 +178,4 @@ def init_db() -> None:
         rows = connection.execute(text("SELECT id, payee_raw FROM transactions WHERE merchant_key IS NULL OR merchant_key = ''")).all()
         for row in rows:
             connection.execute(text("UPDATE transactions SET merchant_key=:key WHERE id=:id"), {"key": merchant_key(row.payee_raw), "id": row.id})
-        # Rules historically used normalized raw descriptions. Re-key them by
-        # merchant identity, merging only equivalent category votes. This is
-        # idempotent: subsequent runs derive the same grouped rows.
-        rules = connection.execute(text("SELECT payee_pattern, category_id, hit_count FROM rules")).all()
-        if rules:
-            grouped: dict[tuple[str, int], int] = {}
-            for rule in rules:
-                key = merchant_key(rule.payee_pattern) or rule.payee_pattern
-                grouped[(key, rule.category_id)] = grouped.get((key, rule.category_id), 0) + rule.hit_count
-            connection.execute(text("DELETE FROM rules"))
-            totals: dict[str, int] = {}
-            for (key, _category_id), hits in grouped.items():
-                totals[key] = totals.get(key, 0) + hits
-            for (key, category_id), hits in grouped.items():
-                connection.execute(
-                    text("INSERT INTO rules (payee_pattern, category_id, hit_count, confidence) VALUES (:key,:category,:hits,:confidence)"),
-                    {"key": key, "category": category_id, "hits": hits, "confidence": hits / totals[key] if totals[key] else 0},
-                )
-            logging.getLogger("cashbook").info(
-                "merchant_rule_migration_completed",
-                extra={"legacy_rule_count": len(rules), "merchant_rule_count": len(grouped)},
-            )
+        _migrate_legacy_rules(connection, text)

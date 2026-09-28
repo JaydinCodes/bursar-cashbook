@@ -1,6 +1,6 @@
 ; Build after PyInstaller: ISCC installer\BursarCashbook.iss
 #define MyAppName "Ledgerly"
-#define MyAppVersion "0.8.0-rc1"
+#define MyAppVersion "0.8.0-rc2"
 #define MyAppPublisher "Ledgerly"
 #define MyAppExeName "BursarCashbook.exe"
 
@@ -12,7 +12,7 @@ AppPublisher={#MyAppPublisher}
 DefaultDirName={autopf}\Bursar Cashbook
 DefaultGroupName={#MyAppName}
 OutputDir=..\release
-OutputBaseFilename=BursarCashbook-0.8.0-rc1-Setup
+OutputBaseFilename=BursarCashbook-0.8.0-rc2-Setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
