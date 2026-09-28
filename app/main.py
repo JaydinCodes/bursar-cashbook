@@ -9,6 +9,7 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -68,6 +69,7 @@ from .merchant_identity import merchant_key
 app = FastAPI(title="Bursar Cashbook Automation", version=APP_VERSION)
 REVIEW_PAGE = resource_path("app", "static", "review.html")
 HELP_PAGE = resource_path("app", "static", "help.html")
+app.mount("/static", StaticFiles(directory=resource_path("app", "static")), name="static")
 FINAL_STATUSES = ("approved", "corrected")
 MAX_UPLOAD_BYTES = 15 * 1024 * 1024
 MAX_TEMPLATE_BYTES = 10 * 1024 * 1024

@@ -43,6 +43,19 @@ class BuildDependencyTests(unittest.TestCase):
         self.assertIn("Narrative column", review_html)
         self.assertIn("narrative_field", review_html)
 
+    def test_desktop_ui_uses_bundled_icons_and_a_guided_workflow(self):
+        review_html = (PROJECT_ROOT / "app" / "static" / "review.html").read_text(
+            encoding="utf-8"
+        )
+        icon_css = PROJECT_ROOT / "app" / "static" / "vendor" / "fontawesome" / "all.min.css"
+        icon_font = PROJECT_ROOT / "app" / "static" / "vendor" / "webfonts" / "fa-solid-900.woff2"
+        self.assertIn("/static/vendor/fontawesome/all.min.css", review_html)
+        self.assertIn("fa-list-check", review_html)
+        self.assertIn("Connect cashbook", review_html)
+        self.assertIn("Check entries", review_html)
+        self.assertTrue(icon_css.is_file())
+        self.assertTrue(icon_font.is_file())
+
 
 class ConfigPathTests(unittest.TestCase):
     def test_override_creates_appdata_structure_without_reseeding_database(self):
