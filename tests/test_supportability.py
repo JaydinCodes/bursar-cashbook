@@ -77,6 +77,25 @@ class SupportabilityApiTests(unittest.TestCase):
         self.assertEqual(imported[0]["entity_id"], statement_id)
         self.assertEqual(imported[0]["details"]["transactions_imported"], 1)
 
+    def test_unsynced_statement_can_be_removed_with_its_transactions(self):
+        statement_id = self._import_statement()
+
+        response = self.client.delete(f"/imports/{statement_id}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["transactions_removed"], 1)
+        self.assertEqual(self.client.get("/imports/history").json(), [])
+        db = self.session_factory()
+        try:
+            self.assertEqual(db.query(Transaction).count(), 0)
+            self.assertTrue(
+                db.query(AuditEvent)
+                .filter(AuditEvent.event_type == "statement.removed")
+                .count()
+            )
+        finally:
+            db.close()
+
     def test_review_updates_history_and_creates_audit_event(self):
         self._import_statement()
         category = self.client.post(

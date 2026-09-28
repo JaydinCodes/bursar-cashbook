@@ -43,7 +43,7 @@ from .diagnostics import build_diagnostics_zip
 from .errors import new_error_id
 from .fingerprints import standard_bank_transaction_fingerprint
 from .logging_config import LOG_DIR, logger
-from .models import AuditEvent, Category, Rule, Statement, Transaction
+from .models import AuditEvent, CashbookSync, Category, Rule, Statement, Transaction
 from .reconciliation import StatementReconciliationError, reconcile_statement
 from .version import APP_VERSION
 from .wced_export import cashbook_target_sheet
@@ -819,6 +819,52 @@ def import_history(
         .all()
     )
     return [_statement_history_item(db, statement) for statement in statements]
+
+
+@app.delete("/imports/{statement_id}")
+def delete_imported_statement(
+    statement_id: int,
+    db: Session = Depends(get_db),
+):
+    statement = db.get(Statement, statement_id)
+    if statement is None:
+        raise HTTPException(status_code=404, detail="Statement import was not found.")
+
+    transaction_ids = [
+        transaction_id
+        for (transaction_id,) in db.query(Transaction.id)
+        .filter(Transaction.statement_id == statement.id)
+        .all()
+    ]
+    if transaction_ids and db.query(CashbookSync.id).filter(
+        CashbookSync.transaction_id.in_(transaction_ids)
+    ).first():
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This statement has transactions already written to the cashbook. "
+                "Restore a cashbook backup instead of removing the import."
+            ),
+        )
+
+    deleted_transactions = len(transaction_ids)
+    if transaction_ids:
+        db.query(Transaction).filter(Transaction.id.in_(transaction_ids)).delete(
+            synchronize_session=False
+        )
+    db.delete(statement)
+    record_audit_event(
+        db,
+        "statement.removed",
+        entity_type="statement",
+        entity_id=statement_id,
+        details={"transactions_removed": deleted_transactions},
+    )
+    db.commit()
+    return {
+        "statement_id": statement_id,
+        "transactions_removed": deleted_transactions,
+    }
 
 
 @app.get("/audit/history")
