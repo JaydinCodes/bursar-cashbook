@@ -197,3 +197,46 @@ class CashbookSync(Base):
     transaction = relationship("Transaction")
     cashbook_profile = relationship("CashbookProfile")
     category = relationship("Category")
+
+
+class CashbookSyncBatch(Base):
+    """An auditable, reversible unit of workbook synchronization."""
+
+    __tablename__ = "cashbook_sync_batches"
+
+    id = Column(Integer, primary_key=True)
+    cashbook_profile_id = Column(Integer, ForeignKey("cashbook_profiles.id"), nullable=False, index=True)
+    pre_sync_backup_filename = Column(String, nullable=False)
+    pre_sync_file_hash = Column(String, nullable=False)
+    post_sync_file_hash = Column(String, nullable=False)
+    completed_at = Column(DateTime, server_default=func.now(), nullable=False, index=True)
+    undone_at = Column(DateTime, nullable=True, index=True)
+    undo_safety_backup_filename = Column(String, nullable=True)
+
+    cashbook_profile = relationship("CashbookProfile")
+    entries = relationship("CashbookSyncBatchEntry", back_populates="batch", cascade="all, delete-orphan")
+
+
+class CashbookSyncBatchEntry(Base):
+    """The prior ledger state for one transaction touched by a sync batch."""
+
+    __tablename__ = "cashbook_sync_batch_entries"
+    __table_args__ = (UniqueConstraint("sync_batch_id", "transaction_id", name="uq_cashbook_sync_batch_entry"),)
+
+    id = Column(Integer, primary_key=True)
+    sync_batch_id = Column(Integer, ForeignKey("cashbook_sync_batches.id"), nullable=False, index=True)
+    transaction_id = Column(Integer, ForeignKey("transactions.id"), nullable=False, index=True)
+    operation = Column(String, nullable=False)  # insert or update
+    # Deliberately not a foreign key: an undo deletes a newly-created ledger
+    # row while retaining this audit snapshot for the batch history.
+    resulting_sync_id = Column(Integer, nullable=True)
+    previous_sync_id = Column(Integer, nullable=True)
+    previous_category_id = Column(Integer, nullable=True)
+    previous_sheet_name = Column(String, nullable=True)
+    previous_row_index = Column(Integer, nullable=True)
+    previous_category_column = Column(Integer, nullable=True)
+    previous_backup_filename = Column(String, nullable=True)
+    previous_synced_at = Column(DateTime, nullable=True)
+
+    batch = relationship("CashbookSyncBatch", back_populates="entries")
+    transaction = relationship("Transaction")

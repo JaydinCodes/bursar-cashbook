@@ -12,6 +12,16 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class BuildDependencyTests(unittest.TestCase):
+    def test_installer_preserves_accounting_data_on_normal_uninstall(self):
+        installer = (PROJECT_ROOT / "installer" / "BursarCashbook.iss").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('AppId={{C7FE7CF9-0957-4C59-8F85-CE9190B231D3}', installer)
+        self.assertIn("Normal uninstall deliberately preserves all accounting data", installer)
+        self.assertNotIn("[UninstallDelete]", installer)
+        self.assertNotIn("cashbook.db*", installer)
+        self.assertNotIn("cashbook.db\"", installer)
+
     def test_pdf_parser_dependency_is_included_in_runtime_and_bundle(self):
         requirements = (PROJECT_ROOT / "requirements.txt").read_text(encoding="utf-8")
         spec = (PROJECT_ROOT / "BursarCashbook.spec").read_text(encoding="utf-8")

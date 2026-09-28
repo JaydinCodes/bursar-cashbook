@@ -16,8 +16,9 @@ from app.cashbook_sync import (
     cashbook_status,
     register_cashbook,
     sync_live_cashbook,
+    undo_latest_sync,
 )
-from app.models import Base, CashbookSync, Category, Statement, Transaction
+from app.models import Base, CashbookSync, CashbookSyncBatch, Category, Statement, Transaction
 
 
 class LiveCashbookStateTests(unittest.TestCase):
@@ -178,6 +179,118 @@ class LiveCashbookXlsIntegrationTests(unittest.TestCase):
     def tearDown(self):
         self.db.close()
         self.engine.dispose()
+
+    def _cashbook_categories(self):
+        import xlrd
+        from app.wced_export import pc_column_categories
+        source = xlrd.open_workbook(str(self.historical), formatting_info=True)
+        names = list(dict.fromkeys(pc_column_categories(source.sheet_by_name("Jan PC")).values()))
+        first = Category(name=names[0], type="expense")
+        second = Category(name=names[1], type="expense")
+        self.db.add_all([first, second]); self.db.flush()
+        return first, second
+
+    def _transaction(self, category, fingerprint, day=31):
+        statement = Statement(
+            bank="Standard Bank", source_filename=f"statement-{fingerprint}.csv", source_hash=fingerprint * 64,
+            period_start=date(2020, 1, day), period_end=date(2020, 1, day), financial_year=2020,
+            opening_balance=Decimal("1000.00"), closing_balance=Decimal("900.00"), total_debits=Decimal("100.00"),
+            total_credits=Decimal("0.00"), reconciliation_difference=Decimal("0.00"), reconciliation_status="passed",
+            source_transaction_count=1, imported_transaction_count=1, duplicate_transaction_count=0,
+        )
+        self.db.add(statement); self.db.flush()
+        transaction = Transaction(
+            statement_id=statement.id, fingerprint=fingerprint * 64, source_row=2, txn_date=date(2020, 1, day),
+            payee_raw=f"SUPPLIER {fingerprint}", payee_normalized=f"SUPPLIER {fingerprint}",
+            balance_after=Decimal("900.00"), amount=Decimal("100.00"), direction="debit",
+            category_id=category.id, status="corrected",
+        )
+        self.db.add(transaction); self.db.commit()
+        return transaction
+
+    def _registered_cashbook(self, root):
+        live_path, backup_dir = root / "active-cashbook.xls", root / "cashbook_backups"
+        return patch.object(cashbook_sync, "DEFAULT_ACTIVE_CASHBOOK", live_path), patch.object(
+            cashbook_sync, "CASHBOOK_BACKUP_DIR", backup_dir
+        )
+
+    def test_sync_then_undo_reverts_only_that_batch(self):
+        first, _ = self._cashbook_categories()
+        transaction = self._transaction(first, "a")
+        with tempfile.TemporaryDirectory() as directory:
+            first_patch, backup_patch = self._registered_cashbook(Path(directory))
+            with first_patch, backup_patch:
+                register_cashbook(self.db, source_filename="2020 cashbook.xls", content=self.historical.read_bytes())
+                synced = sync_live_cashbook(self.db)
+                self.assertEqual(synced["written"], 1)
+                undone = undo_latest_sync(self.db)
+                self.assertEqual(undone["transactions_reverted"], 1)
+                self.assertEqual(self.db.query(CashbookSync).count(), 0)
+                self.assertEqual(cashbook_status(self.db)["needs_sync"], 1)
+                self.assertIsNotNone(self.db.get(CashbookSyncBatch, synced["batch_id"]).undone_at)
+
+    def test_two_syncs_undoes_second_without_corrupting_first(self):
+        first, _ = self._cashbook_categories()
+        one = self._transaction(first, "a")
+        two = self._transaction(first, "b")
+        with tempfile.TemporaryDirectory() as directory:
+            first_patch, backup_patch = self._registered_cashbook(Path(directory))
+            with first_patch, backup_patch:
+                register_cashbook(self.db, source_filename="2020 cashbook.xls", content=self.historical.read_bytes())
+                sync_one = sync_live_cashbook(self.db, transaction_ids=[one.id])
+                sync_two = sync_live_cashbook(self.db, transaction_ids=[two.id])
+                undo_latest_sync(self.db)
+                self.assertIsNotNone(self.db.query(CashbookSync).filter_by(transaction_id=one.id).one_or_none())
+                self.assertIsNone(self.db.query(CashbookSync).filter_by(transaction_id=two.id).one_or_none())
+                self.assertIsNone(self.db.get(CashbookSyncBatch, sync_one["batch_id"]).undone_at)
+                self.assertIsNotNone(self.db.get(CashbookSyncBatch, sync_two["batch_id"]).undone_at)
+
+    def test_correction_undo_restores_prior_sync_ledger(self):
+        first, second = self._cashbook_categories()
+        transaction = self._transaction(first, "c")
+        with tempfile.TemporaryDirectory() as directory:
+            first_patch, backup_patch = self._registered_cashbook(Path(directory))
+            with first_patch, backup_patch:
+                register_cashbook(self.db, source_filename="2020 cashbook.xls", content=self.historical.read_bytes())
+                sync_live_cashbook(self.db)
+                prior = self.db.query(CashbookSync).filter_by(transaction_id=transaction.id).one()
+                prior_column = prior.category_column
+                transaction.category_id = second.id; self.db.commit()
+                corrected = sync_live_cashbook(self.db, transaction_ids=[transaction.id])
+                self.assertEqual(corrected["updated"], 1)
+                undo_latest_sync(self.db)
+                restored = self.db.query(CashbookSync).filter_by(transaction_id=transaction.id).one()
+                self.assertEqual(restored.category_id, first.id)
+                self.assertEqual(restored.category_column, prior_column)
+
+    def test_missing_batch_backup_refuses_without_ledger_change(self):
+        first, _ = self._cashbook_categories()
+        transaction = self._transaction(first, "d")
+        with tempfile.TemporaryDirectory() as directory:
+            first_patch, backup_patch = self._registered_cashbook(Path(directory))
+            with first_patch, backup_patch:
+                register_cashbook(self.db, source_filename="2020 cashbook.xls", content=self.historical.read_bytes())
+                result = sync_live_cashbook(self.db)
+                (Path(directory) / "cashbook_backups" / result["backup"]).unlink()
+                with self.assertRaisesRegex(cashbook_sync.CashbookSyncError, "pre-sync backup is missing"):
+                    undo_latest_sync(self.db)
+                self.assertIsNotNone(self.db.query(CashbookSync).filter_by(transaction_id=transaction.id).one_or_none())
+
+    def test_restart_and_repeated_undo_are_safe(self):
+        first, _ = self._cashbook_categories()
+        transaction = self._transaction(first, "e")
+        with tempfile.TemporaryDirectory() as directory:
+            first_patch, backup_patch = self._registered_cashbook(Path(directory))
+            with first_patch, backup_patch:
+                register_cashbook(self.db, source_filename="2020 cashbook.xls", content=self.historical.read_bytes())
+                sync_live_cashbook(self.db)
+                # Simulate a restart: discard the session and reopen against the same durable database.
+                self.db.close()
+                self.db = sessionmaker(bind=self.engine, expire_on_commit=False)()
+                undo_latest_sync(self.db)
+                with self.assertRaisesRegex(cashbook_sync.CashbookSyncError, "no reversible sync"):
+                    undo_latest_sync(self.db)
+                self.assertIsNone(self.db.query(CashbookSync).filter_by(transaction_id=transaction.id).one_or_none())
 
     def test_sync_preserves_existing_rows_and_writes_payment_details_and_receipt_from(self):
         import xlrd

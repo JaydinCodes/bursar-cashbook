@@ -23,15 +23,15 @@ Use a clean Windows VM or machine with **no Python, pip, Git, virtual environmen
 
 ## Upgrade preservation
 
-1. Install v1 and create recognisable test content and a registered cashbook.
-2. Install a newer `BursarCashbook-Setup.exe` over it.
+1. Install 0.8.0-rc1 and create recognisable test content and a registered cashbook.
+2. Install the next release (currently 0.8.0-rc2) over it; the installer AppId must remain unchanged.
 3. Launch the application.
 
-- [ ] Confirm categories, statements, audit history, `cashbooks\\active-cashbook.xls`, backups, logs, and configuration still exist.
+- [ ] Confirm categories, statements, learned rules, sync history, `cashbooks\\active-cashbook.xls`, backups, logs, and configuration still exist.
 - [ ] Confirm no seed/import step ran automatically.
 
 ## Uninstall preservation
 
 - [ ] Uninstall and confirm binaries and shortcuts are removed.
-- [ ] Confirm `%LOCALAPPDATA%\\BursarCashbook` still exists with financial data intact.
+- [ ] Confirm `%LOCALAPPDATA%\\BursarCashbook` still exists with the database, transaction history, learned rules, sync history, cashbooks, backups, logs, and configuration intact.
 - [ ] Record that data must be manually removed only with bursar approval.

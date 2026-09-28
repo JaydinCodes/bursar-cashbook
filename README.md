@@ -10,7 +10,7 @@ The bursar does not need Python, a terminal, or a batch file.
 2. Open **Bursar Cashbook** from the Desktop or Start Menu.
 3. Register the current cashbook, import a Standard Bank statement, review exceptions, and open the cashbook in Excel.
 
-Application records are kept in `%LOCALAPPDATA%\\BursarCashbook`, not in Program Files. This includes the database, live cashbook, backups, logs, and configuration. Upgrades and normal uninstalls preserve these records.
+Application records are kept in `%LOCALAPPDATA%\\BursarCashbook`, not in Program Files. This includes the SQLite database (transactions, learned rules, and sync history), live cashbook, backups, logs, and configuration. Upgrades and normal uninstalls preserve these records. Only the explicit in-app **Clear workspace** action removes Ledgerly database records.
 
 See [the bursar guide](docs/BURSAR_USER_GUIDE.md) and [Windows release checklist](docs/WINDOWS_RELEASE_CHECKLIST.md).
 

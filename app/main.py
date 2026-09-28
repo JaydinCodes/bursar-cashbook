@@ -44,7 +44,17 @@ from .diagnostics import build_diagnostics_zip
 from .errors import new_error_id
 from .fingerprints import standard_bank_transaction_fingerprint
 from .logging_config import LOG_DIR, logger
-from .models import AuditEvent, CashbookProfile, CashbookSync, Category, Rule, Statement, Transaction
+from .models import (
+    AuditEvent,
+    CashbookProfile,
+    CashbookSync,
+    CashbookSyncBatch,
+    CashbookSyncBatchEntry,
+    Category,
+    Rule,
+    Statement,
+    Transaction,
+)
 from .reconciliation import StatementReconciliationError, reconcile_statement
 from .version import APP_VERSION
 from .wced_export import cashbook_target_sheet
@@ -80,6 +90,7 @@ class ReviewDecision(BaseModel):
     learn: bool = True
     apply_to_matches: bool = False
     cashbook_narrative: str | None = None
+    clear_cashbook_narrative: bool = False
 
 
 class CategoryCreate(BaseModel):
@@ -447,21 +458,7 @@ async def register_live_cashbook(
 
     category_sync = sync_categories_from_layout(db, layout)
     db.commit()
-
-    try:
-        sync_result = sync_live_cashbook(db)
-    except CashbookSyncError as exc:
-        sync_result = {
-            "status": "needs_attention",
-            "message": str(exc),
-            "written": 0,
-            "updated": 0,
-            "already_synced": 0,
-        }
-        logger.warning(
-            "initial_live_cashbook_sync_failed",
-            extra={"cashbook_profile_id": profile.id, "reason": str(exc)},
-        )
+    live_cashbook = cashbook_status(db)
 
     record_audit_event(
         db,
@@ -492,7 +489,12 @@ async def register_live_cashbook(
             "payment_category_count": len(layout["payment_categories"]),
             "receipt_category_count": len(layout["receipt_categories"]),
         },
-        "sync": sync_result,
+        "cashbook_sync": {
+            "status": "pending_confirmation",
+            "message": "The cashbook is connected. Review transactions, preview the sync, then choose Sync now.",
+            "cashbook_needs_sync": live_cashbook["needs_sync"],
+            "eligible_transactions": live_cashbook["eligible_transactions"],
+        },
         "categories": category_sync,
     }
 
@@ -919,6 +921,11 @@ def reset_workspace(db: Session = Depends(get_db)):
         "statements": db.query(Statement).count(),
         "transactions": db.query(Transaction).count(),
     }
+    # Batch records are accounting ledger metadata too. Remove their snapshots
+    # first so the explicit reset can safely clear the database on SQLite with
+    # foreign-key enforcement enabled.
+    db.query(CashbookSyncBatchEntry).delete(synchronize_session=False)
+    db.query(CashbookSyncBatch).delete(synchronize_session=False)
     db.query(CashbookSync).delete(synchronize_session=False)
     db.query(Transaction).delete(synchronize_session=False)
     db.query(Statement).delete(synchronize_session=False)
@@ -1231,16 +1238,13 @@ async def upload_statement(
     db.commit()
     db.refresh(statement)
 
-    try:
-        cashbook_sync_result = sync_live_cashbook(db)
-    except CashbookSyncError as exc:
-        cashbook_sync_result = {
-            "status": "needs_attention",
-            "message": str(exc),
-            "written": 0,
-            "updated": 0,
-        }
-        logger.warning("automatic_cashbook_sync_failed", extra={"statement_id": statement.id, "reason": str(exc)})
+    live_cashbook = cashbook_status(db)
+    cashbook_sync_result = {
+        "status": "pending_confirmation",
+        "message": "No cashbook changes were made. Review transactions, preview the sync, then choose Sync now.",
+        "cashbook_needs_sync": live_cashbook["needs_sync"],
+        "eligible_transactions": live_cashbook["eligible_transactions"],
+    }
 
     logger.info(
         "statement_import_completed",
@@ -1453,7 +1457,16 @@ def review_transaction(
         for matching_id in matching_ids:
             results.append(review_transaction(
                 matching_id,
-                ReviewDecision(category_id=decision.category_id, learn=decision.learn),
+                # Pass the bursar's whole decision but deliberately turn bulk
+                # selection off: these IDs were already constrained by the
+                # same merchant identity and direction.
+                ReviewDecision(
+                    category_id=decision.category_id,
+                    learn=decision.learn,
+                    cashbook_narrative=decision.cashbook_narrative,
+                    clear_cashbook_narrative=decision.clear_cashbook_narrative,
+                    apply_to_matches=False,
+                ),
                 db,
             ))
         return {
@@ -1467,6 +1480,11 @@ def review_transaction(
     previous_status = transaction.status
     same_final_category = (
         transaction.status in FINAL_STATUSES and transaction.category_id == category.id
+    )
+    narrative = (
+        decision.cashbook_narrative.strip()
+        if decision.cashbook_narrative is not None
+        else None
     )
 
     learning_changed = False
@@ -1485,24 +1503,32 @@ def review_transaction(
             transaction.payee_raw,
             category.id,
             db,
-            cashbook_narrative=decision.cashbook_narrative,
+            cashbook_narrative=narrative,
         )
         transaction.learned_category_id = category.id
         learning_changed = True
 
-    if decision.cashbook_narrative is not None:
-        transaction.cashbook_narrative = decision.cashbook_narrative.strip() or None
+    if narrative:
+        transaction.cashbook_narrative = narrative
+    elif decision.clear_cashbook_narrative:
+        # Clearing a narrative is deliberately opt-in. A blank UI field must
+        # not erase a previously learned cashbook wording by accident.
+        transaction.cashbook_narrative = None
+        if decision.learn:
+            learned_rule = (
+                db.query(Rule)
+                .filter(Rule.payee_pattern == transaction.merchant_key)
+                .filter(Rule.category_id == category.id)
+                .first()
+            )
+            if learned_rule is not None:
+                learned_rule.cashbook_narrative = None
 
     if same_final_category and not learning_changed:
-        try:
-            cashbook_sync_result = sync_live_cashbook(db, transaction_ids=[transaction.id])
-        except CashbookSyncError as exc:
-            cashbook_sync_result = {
-                "status": "needs_attention",
-                "message": str(exc),
-                "written": 0,
-                "updated": 0,
-            }
+        # A bursar may refine the narrative without changing the category.
+        # This remains a review-only operation and must persist without a sync.
+        db.commit()
+        live_cashbook = cashbook_status(db)
         logger.info(
             "transaction_review_idempotent_retry",
             extra={"transaction_id": transaction.id, "category_id": category.id},
@@ -1512,7 +1538,12 @@ def review_transaction(
             "status": transaction.status,
             "learned": False,
             "idempotent": True,
-            "cashbook_sync": cashbook_sync_result,
+            "cashbook_sync": {
+                "status": "pending_confirmation",
+                "message": "The review decision is saved. Use Sync now to update the cashbook.",
+                "cashbook_needs_sync": live_cashbook["needs_sync"],
+                "eligible_transactions": live_cashbook["eligible_transactions"],
+            },
         }
 
     transaction.category_id = category.id
@@ -1540,16 +1571,7 @@ def review_transaction(
     )
     db.commit()
 
-    try:
-        cashbook_sync_result = sync_live_cashbook(db, transaction_ids=[transaction.id])
-    except CashbookSyncError as exc:
-        cashbook_sync_result = {
-            "status": "needs_attention",
-            "message": str(exc),
-            "written": 0,
-            "updated": 0,
-        }
-        logger.warning("automatic_cashbook_sync_failed", extra={"transaction_id": transaction.id, "reason": str(exc)})
+    live_cashbook = cashbook_status(db)
 
     logger.info(
         "transaction_reviewed",
@@ -1567,7 +1589,12 @@ def review_transaction(
         "status": transaction.status,
         "learned": learning_changed,
         "idempotent": False,
-        "cashbook_sync": cashbook_sync_result,
+        "cashbook_sync": {
+            "status": "pending_confirmation",
+            "message": "The review decision is saved. Use Sync now to update the cashbook.",
+            "cashbook_needs_sync": live_cashbook["needs_sync"],
+            "eligible_transactions": live_cashbook["eligible_transactions"],
+        },
     }
 
 

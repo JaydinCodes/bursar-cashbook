@@ -19,7 +19,14 @@ import shutil
 from sqlalchemy.orm import Session
 
 from .config import CASHBOOK_BACKUP_DIR, DEFAULT_ACTIVE_CASHBOOK
-from .models import CashbookProfile, CashbookSync, Category, Transaction
+from .models import (
+    CashbookProfile,
+    CashbookSync,
+    CashbookSyncBatch,
+    CashbookSyncBatchEntry,
+    Category,
+    Transaction,
+)
 from .wced_export import (
     WcedExportError,
     WcedPlacement,
@@ -255,7 +262,10 @@ def _cashbook_backup(path: Path, reason: str) -> Path:
         reverse=True,
     )
     for stale in backups[CASHBOOK_BACKUP_RETENTION:]:
-        stale.unlink(missing_ok=True)
+        # A completed sync batch depends on its pre-sync workbook.  Never
+        # discard those durable undo points as part of routine housekeeping.
+        if "-before-sync" not in stale.name:
+            stale.unlink(missing_ok=True)
     return destination
 
 
@@ -279,34 +289,70 @@ def list_cashbook_backups() -> list[dict]:
 
 
 def undo_latest_sync(db: Session) -> dict:
-    """Restore the pre-sync workbook only when its ledger can be safely reversed."""
+    """Reverse exactly one completed sync batch, newest first."""
     profile = get_active_cashbook(db)
     if profile is None:
         raise CashbookSyncError("No cashbook is connected.")
-    latest = (
-        db.query(CashbookSync.backup_filename)
-        .filter(CashbookSync.cashbook_profile_id == profile.id)
-        .filter(CashbookSync.backup_filename.is_not(None))
-        .order_by(CashbookSync.synced_at.desc(), CashbookSync.id.desc())
+    batch = (
+        db.query(CashbookSyncBatch)
+        .filter(CashbookSyncBatch.cashbook_profile_id == profile.id)
+        .filter(CashbookSyncBatch.undone_at.is_(None))
+        .order_by(CashbookSyncBatch.completed_at.desc(), CashbookSyncBatch.id.desc())
         .first()
     )
-    if latest is None:
+    if batch is None:
         raise CashbookSyncError("There is no reversible sync in this cashbook.")
-    backup_name = latest[0]
-    all_syncs = db.query(CashbookSync).filter(CashbookSync.cashbook_profile_id == profile.id).all()
-    undo_syncs = [item for item in all_syncs if item.backup_filename == backup_name]
-    if len(undo_syncs) != len(all_syncs):
-        raise CashbookSyncError("Undo is available only for the first sync. Restore a named backup for older sync history.")
-    backup_path = CASHBOOK_BACKUP_DIR / backup_name
+    backup_path = CASHBOOK_BACKUP_DIR / batch.pre_sync_backup_filename
     if not backup_path.is_file():
         raise CashbookSyncError("The pre-sync backup is missing, so undo was stopped.")
     path = Path(profile.file_path)
-    _cashbook_backup(path, "before-undo")
-    shutil.copy2(backup_path, path)
-    db.query(CashbookSync).filter(CashbookSync.id.in_([item.id for item in undo_syncs])).delete(synchronize_session=False)
-    profile.file_hash = sha256(path.read_bytes()).hexdigest()
-    db.commit()
-    return {"status": "undone", "backup": backup_name, "transactions_reverted": len(undo_syncs)}
+    if not path.is_file():
+        raise CashbookSyncError("The registered cashbook file is missing. Undo was stopped.")
+    if sha256(path.read_bytes()).hexdigest() != batch.post_sync_file_hash:
+        raise CashbookSyncError(
+            "The cashbook has changed since the last sync. Undo was stopped to protect newer workbook changes."
+        )
+
+    safety_backup = _cashbook_backup(path, "before-undo")
+    temporary = path.with_suffix(".xls.undo.tmp")
+    try:
+        shutil.copy2(backup_path, temporary)
+        temporary.replace(path)
+        for entry in batch.entries:
+            if entry.operation == "insert":
+                sync = db.get(CashbookSync, entry.resulting_sync_id)
+                if sync is None or sync.transaction_id != entry.transaction_id:
+                    raise CashbookSyncError("The sync ledger changed after this batch. Undo was stopped.")
+                db.delete(sync)
+            elif entry.operation == "update":
+                sync = db.get(CashbookSync, entry.previous_sync_id)
+                if sync is None or sync.transaction_id != entry.transaction_id:
+                    raise CashbookSyncError("The sync ledger changed after this batch. Undo was stopped.")
+                sync.category_id = entry.previous_category_id
+                sync.sheet_name = entry.previous_sheet_name
+                sync.row_index = entry.previous_row_index
+                sync.category_column = entry.previous_category_column
+                sync.backup_filename = entry.previous_backup_filename
+                sync.synced_at = entry.previous_synced_at
+            else:
+                raise CashbookSyncError("The sync batch contains an unknown ledger operation.")
+        batch.undone_at = datetime.now().astimezone().replace(tzinfo=None)
+        batch.undo_safety_backup_filename = safety_backup.name
+        profile.file_hash = sha256(path.read_bytes()).hexdigest()
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        try:
+            shutil.copy2(safety_backup, temporary)
+            temporary.replace(path)
+        except OSError as restore_exc:
+            raise CashbookSyncError(
+                "Undo could not be completed and the workbook could not be restored from its safety backup."
+            ) from restore_exc
+        if isinstance(exc, CashbookSyncError):
+            raise
+        raise CashbookSyncError("Undo could not update the sync ledger; the workbook was restored safely.") from exc
+    return {"status": "undone", "backup": batch.pre_sync_backup_filename, "transactions_reverted": len(batch.entries), "batch_id": batch.id}
 
 
 def _same_money(actual: object, expected: Decimal) -> bool:
@@ -404,6 +450,7 @@ def preview_live_cashbook_sync(db: Session) -> dict:
                          "payee": transaction.payee_raw, "amount": str(transaction.amount),
                          "direction": transaction.direction, "sheet_name": sheet_name,
                          "category": category.name, "row_index": next_rows[sheet_name],
+                         "cashbook_narrative": transaction.cashbook_narrative or transaction.payee_raw,
                          "narrative_field": "Details" if transaction.direction == "debit" else "From (Receipt Numbers)"})
             next_rows[sheet_name] += 1
         except (CashbookSyncError, WcedExportError, Exception) as exc:
@@ -543,7 +590,7 @@ def sync_live_cashbook(
                 WcedPlacement(
                     transaction_id=transaction.id,
                     txn_date=transaction.txn_date,
-                    description=transaction.payee_raw,
+                    description=transaction.cashbook_narrative or transaction.payee_raw,
                     amount=transaction.amount,
                     direction=transaction.direction,
                     category_name=category.name,
@@ -574,7 +621,7 @@ def sync_live_cashbook(
             WcedPlacement(
                 transaction_id=transaction.id,
                 txn_date=transaction.txn_date,
-                description=transaction.payee_raw,
+                description=transaction.cashbook_narrative or transaction.payee_raw,
                 amount=transaction.amount,
                 direction=transaction.direction,
                 category_name=category.name,
@@ -611,6 +658,7 @@ def sync_live_cashbook(
     except WcedExportError as exc:
         raise CashbookSyncError(str(exc)) from exc
 
+    pre_sync_file_hash = sha256(path.read_bytes()).hexdigest()
     backup_path = _cashbook_backup(path, "before-sync")
     temporary = path.with_suffix(".xls.tmp")
     try:
@@ -627,23 +675,61 @@ def sync_live_cashbook(
         raise CashbookSyncError("The live cashbook could not be updated safely.") from exc
 
     try:
+        batch = CashbookSyncBatch(
+            cashbook_profile_id=profile.id,
+            pre_sync_backup_filename=backup_path.name,
+            pre_sync_file_hash=pre_sync_file_hash,
+            post_sync_file_hash=sha256(content).hexdigest(),
+        )
+        db.add(batch)
+        db.flush()
+        batch_entries: list[CashbookSyncBatchEntry] = []
         for transaction, sheet_name, row, category_column in new_syncs:
-            db.add(
-                CashbookSync(
-                    transaction_id=transaction.id,
-                    cashbook_profile_id=profile.id,
-                    category_id=transaction.category_id,
-                    sheet_name=sheet_name,
-                    row_index=row,
-                    category_column=category_column,
-                    backup_filename=backup_path.name,
-                )
+            sync = CashbookSync(
+                transaction_id=transaction.id,
+                cashbook_profile_id=profile.id,
+                category_id=transaction.category_id,
+                sheet_name=sheet_name,
+                row_index=row,
+                category_column=category_column,
+                backup_filename=backup_path.name,
             )
+            db.add(sync)
+            batch_entries.append(CashbookSyncBatchEntry(
+                sync_batch_id=batch.id, transaction_id=transaction.id, operation="insert",
+            ))
 
         for sync, category_column in updated_syncs:
             transaction = next(item for item in transactions if item.id == sync.transaction_id)
+            batch_entries.append(CashbookSyncBatchEntry(
+                sync_batch_id=batch.id,
+                transaction_id=sync.transaction_id,
+                operation="update",
+                resulting_sync_id=sync.id,
+                previous_sync_id=sync.id,
+                previous_category_id=sync.category_id,
+                previous_sheet_name=sync.sheet_name,
+                previous_row_index=sync.row_index,
+                previous_category_column=sync.category_column,
+                previous_backup_filename=sync.backup_filename,
+                previous_synced_at=sync.synced_at,
+            ))
             sync.category_id = transaction.category_id
             sync.category_column = category_column
+            sync.backup_filename = backup_path.name
+
+        db.flush()
+        new_by_transaction = {
+            sync.transaction_id: sync
+            for sync in db.query(CashbookSync).filter(
+                CashbookSync.cashbook_profile_id == profile.id,
+                CashbookSync.transaction_id.in_([transaction.id for transaction, *_ in new_syncs]),
+            )
+        }
+        for entry in batch_entries:
+            if entry.operation == "insert":
+                entry.resulting_sync_id = new_by_transaction[entry.transaction_id].id
+            db.add(entry)
 
         profile.file_hash = sha256(content).hexdigest()
         # xlutils can normalize some BIFF metadata while preserving the
@@ -656,7 +742,14 @@ def sync_live_cashbook(
         db.commit()
     except Exception:
         db.rollback()
-        shutil.copy2(backup_path, path)
+        rollback_temporary = path.with_suffix(".xls.rollback.tmp")
+        try:
+            shutil.copy2(backup_path, rollback_temporary)
+            rollback_temporary.replace(path)
+        except OSError as restore_exc:
+            raise CashbookSyncError(
+                "The sync ledger could not be saved and the workbook could not be restored from its backup."
+            ) from restore_exc
         raise
 
     return {
@@ -666,6 +759,7 @@ def sync_live_cashbook(
         "updated": updated,
         "already_synced": already_synced,
         "backup": backup_path.name,
+        "batch_id": batch.id,
         "cashbook_filename": profile.source_filename,
     }
 

@@ -1,4 +1,8 @@
 import unittest
+from hashlib import sha256
+from pathlib import Path
+import tempfile
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -7,6 +11,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.main import app, get_db
 from app.models import Base, Rule, Transaction
+from app import cashbook_sync
 
 
 class MainApiTests(unittest.TestCase):
@@ -55,7 +60,7 @@ class MainApiTests(unittest.TestCase):
         )
         self.assertEqual(upload.status_code, 201)
         self.assertEqual(upload.json()["reconciliation"]["difference"], "0.00")
-        self.assertEqual(upload.json()["cashbook_sync"]["status"], "not_registered")
+        self.assertEqual(upload.json()["cashbook_sync"]["status"], "pending_confirmation")
 
         pending_summary = self.client.get("/cashbook/summary?year=2026").json()
         self.assertEqual(pending_summary["pending"], 1)
@@ -67,7 +72,7 @@ class MainApiTests(unittest.TestCase):
             json={"category_id": category_id, "learn": True},
         )
         self.assertEqual(reviewed.status_code, 200)
-        self.assertEqual(reviewed.json()["cashbook_sync"]["status"], "not_registered")
+        self.assertEqual(reviewed.json()["cashbook_sync"]["status"], "pending_confirmation")
 
         summary = self.client.get("/cashbook/summary?year=2026").json()
         self.assertTrue(summary["ready"])
@@ -77,6 +82,75 @@ class MainApiTests(unittest.TestCase):
         # Phase 6 explicitly retires generated/downloaded cashbooks.
         retired = self.client.get("/exports/wced-cashbook.xls?year=2026")
         self.assertEqual(retired.status_code, 410)
+
+    def test_excel_changes_only_after_explicit_sync_confirmation(self):
+        workbook = Path(__file__).parents[1] / "data" / "2020_cashbook.xls"
+        statement = (
+            "Transaction Date,Details,Debit,Credit,Balance,Reference\n"
+            "31/01/2020,CONTROLLED WORKFLOW SUPPLIER,100.00,,900.00,CONTROL-1\n"
+        ).encode()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            live_path = root / "active-cashbook.xls"
+            backup_dir = root / "cashbook_backups"
+            with patch.object(cashbook_sync, "DEFAULT_ACTIVE_CASHBOOK", live_path), patch.object(
+                cashbook_sync, "CASHBOOK_BACKUP_DIR", backup_dir
+            ):
+                registered = self.client.post(
+                    "/cashbook/register",
+                    files={"file": ("2020 cashbook.xls", workbook.read_bytes(), "application/vnd.ms-excel")},
+                )
+                self.assertEqual(registered.status_code, 201)
+                original_hash = sha256(live_path.read_bytes()).hexdigest()
+
+                uploaded = self.client.post(
+                    "/statements/upload",
+                    data={"bank": "Standard Bank"},
+                    files={"file": ("statement.csv", statement, "text/csv")},
+                )
+                self.assertEqual(uploaded.status_code, 201)
+                self.assertEqual(uploaded.json()["cashbook_sync"]["status"], "pending_confirmation")
+                self.assertEqual(uploaded.json()["cashbook_sync"]["eligible_transactions"], 0)
+                self.assertEqual(sha256(live_path.read_bytes()).hexdigest(), original_hash)
+
+                # Pending transactions are never eligible for the explicit writer.
+                pending_sync = self.client.post("/cashbook/sync")
+                self.assertEqual(pending_sync.status_code, 200)
+                self.assertEqual(pending_sync.json()["status"], "up_to_date")
+                self.assertEqual(sha256(live_path.read_bytes()).hexdigest(), original_hash)
+
+                category_id = next(
+                    item["id"] for item in self.client.get("/categories").json()
+                    if item["type"] == "expense"
+                )
+                pending = self.client.get("/transactions/pending").json()[0]
+                reviewed = self.client.post(
+                    f"/transactions/{pending['id']}/review",
+                    json={"category_id": category_id, "cashbook_narrative": "CONTROLLED SUPPLIER"},
+                )
+                self.assertEqual(reviewed.status_code, 200)
+                self.assertEqual(reviewed.json()["cashbook_sync"]["cashbook_needs_sync"], 1)
+                self.assertEqual(reviewed.json()["cashbook_sync"]["eligible_transactions"], 1)
+                self.assertEqual(sha256(live_path.read_bytes()).hexdigest(), original_hash)
+
+                preview = self.client.get("/cashbook/sync-preview")
+                self.assertEqual(preview.status_code, 200)
+                self.assertTrue(preview.json()["ready"])
+                self.assertEqual(preview.json()["transactions"][0]["payee"], "CONTROLLED WORKFLOW SUPPLIER")
+                self.assertEqual(preview.json()["transactions"][0]["cashbook_narrative"], "CONTROLLED SUPPLIER")
+                self.assertEqual(sha256(live_path.read_bytes()).hexdigest(), original_hash)
+
+                synced = self.client.post("/cashbook/sync")
+                self.assertEqual(synced.status_code, 200)
+                self.assertEqual(synced.json()["status"], "synced")
+                self.assertEqual(synced.json()["written"], 1)
+                synced_hash = sha256(live_path.read_bytes()).hexdigest()
+                self.assertNotEqual(synced_hash, original_hash)
+
+                repeated = self.client.post("/cashbook/sync")
+                self.assertEqual(repeated.status_code, 200)
+                self.assertEqual(repeated.json()["status"], "up_to_date")
+                self.assertEqual(sha256(live_path.read_bytes()).hexdigest(), synced_hash)
 
     def test_overlapping_statement_skips_existing_transactions(self):
         first = (

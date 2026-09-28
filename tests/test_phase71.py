@@ -13,7 +13,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.cashbook_sync import sync_categories_from_layout
 from app.main import app, get_db
-from app.models import Base, Category, Statement, Transaction
+from app.models import Base, Category, Rule, Statement, Transaction
 from app.presentation import display_payee, display_reference
 
 
@@ -40,11 +40,13 @@ class Phase71Tests(unittest.TestCase):
     def tearDown(self):
         app.dependency_overrides.clear(); self.engine.dispose()
 
-    def transaction(self, db, fingerprint, description, direction="debit"):
+    def transaction(self, db, fingerprint, description, direction="debit", merchant="UBER CPT", narrative=None):
         row = statement(); row.source_hash = fingerprint * 64; db.add(row); db.flush()
         db.add(Transaction(statement_id=row.id, fingerprint=(fingerprint * 64)[:64], source_row=2,
-            txn_date=date(2026, 9, 7), payee_raw=description, payee_normalized="UBER CPT", merchant_key="UBER CPT",
+            txn_date=date(2026, 9, 7), payee_raw=description, payee_normalized=merchant, merchant_key=merchant,
             reference=None, balance_after=Decimal("100"), amount=Decimal("24"), direction=direction, status="pending"))
+        db.flush()
+        db.query(Transaction).filter_by(fingerprint=(fingerprint * 64)[:64]).one().cashbook_narrative = narrative
 
     def test_workbook_categories_upsert_by_type_without_duplicates(self):
         db = self.Session()
@@ -84,6 +86,78 @@ class Phase71Tests(unittest.TestCase):
             self.assertEqual(db.query(Transaction).filter_by(direction="debit", status="pending").count(), 0)
             self.assertEqual(db.query(Transaction).filter_by(direction="credit", status="pending").count(), 1)
         finally: db.close()
+
+    def test_bulk_review_propagates_category_and_narrative_without_learning(self):
+        db = self.Session()
+        try:
+            expense = Category(name="Transport", type="expense")
+            income = Category(name="Fees", type="income")
+            db.add_all([expense, income]); db.flush()
+            self.transaction(db, "a", "UBER DEBIT 1")
+            self.transaction(db, "b", "UBER DEBIT 2")
+            self.transaction(db, "c", "UBER CREDIT", direction="credit")
+            self.transaction(db, "d", "OTHER DEBIT", merchant="OTHER MERCHANT")
+            db.commit()
+            debit_id = db.query(Transaction.id).filter_by(fingerprint="a" * 64).scalar()
+        finally:
+            db.close()
+
+        response = self.client.post(
+            f"/transactions/{debit_id}/review",
+            json={
+                "category_id": expense.id,
+                "cashbook_narrative": "UBER TRANSPORT",
+                "learn": False,
+                "apply_to_matches": True,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["reviewed_count"], 2)
+
+        db = self.Session()
+        try:
+            debits = db.query(Transaction).filter_by(merchant_key="UBER CPT", direction="debit").all()
+            self.assertEqual(len(debits), 2)
+            self.assertTrue(all(item.category_id == expense.id for item in debits))
+            self.assertTrue(all(item.cashbook_narrative == "UBER TRANSPORT" for item in debits))
+            self.assertTrue(all(item.learned_category_id is None for item in debits))
+            self.assertEqual(db.query(Rule).count(), 0)
+            self.assertEqual(db.query(Transaction).filter_by(direction="credit", status="pending").count(), 1)
+            self.assertEqual(db.query(Transaction).filter_by(merchant_key="OTHER MERCHANT", status="pending").count(), 1)
+        finally:
+            db.close()
+
+    def test_bulk_blank_narrative_preserves_existing_and_learned_wording(self):
+        db = self.Session()
+        try:
+            category = Category(name="Transport", type="expense")
+            db.add(category); db.flush()
+            db.add(Rule(payee_pattern="UBER CPT", category_id=category.id, hit_count=3,
+                        confidence=Decimal("1"), cashbook_narrative="KEEP LEARNED"))
+            self.transaction(db, "e", "UBER DEBIT 1", narrative="KEEP FIRST")
+            self.transaction(db, "f", "UBER DEBIT 2", narrative="KEEP SECOND")
+            db.commit()
+            debit_id = db.query(Transaction.id).filter_by(fingerprint="e" * 64).scalar()
+        finally:
+            db.close()
+
+        response = self.client.post(
+            f"/transactions/{debit_id}/review",
+            json={"category_id": category.id, "cashbook_narrative": "   ", "learn": True, "apply_to_matches": True},
+        )
+        self.assertEqual(response.status_code, 200)
+
+        db = self.Session()
+        try:
+            narratives = {
+                item.fingerprint: item.cashbook_narrative
+                for item in db.query(Transaction).filter_by(merchant_key="UBER CPT", direction="debit")
+            }
+            self.assertEqual(narratives["e" * 64], "KEEP FIRST")
+            self.assertEqual(narratives["f" * 64], "KEEP SECOND")
+            self.assertEqual(db.query(Rule).filter_by(payee_pattern="UBER CPT").one().cashbook_narrative, "KEEP LEARNED")
+        finally:
+            db.close()
 
     def test_compact_transaction_queue_allows_ten_entries_per_page(self):
         response = self.client.get("/transactions/pending?page=1&page_size=10")

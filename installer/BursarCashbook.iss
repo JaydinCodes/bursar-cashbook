@@ -19,13 +19,12 @@ WizardStyle=modern
 SetupIconFile=..\assets\ledgerly.ico
 UninstallDisplayName={#MyAppName}
 ; Accounting data is in %LOCALAPPDATA%\BursarCashbook and is not installed.
-; Uninstall removes the database so a later installation starts fresh.
+; Normal uninstall deliberately preserves all accounting data, backups, logs,
+; and configuration. The in-app Clear workspace action is the only supported
+; way to remove Ledgerly records.
 
 [Files]
 Source: "..\dist\BursarCashbook.exe"; DestDir: "{app}"; Flags: ignoreversion
-
-[UninstallDelete]
-Type: files; Name: "{localappdata}\BursarCashbook\data\cashbook.db*"
 
 [Icons]
 Name: "{autoprograms}\Ledgerly"; Filename: "{app}\{#MyAppExeName}"
