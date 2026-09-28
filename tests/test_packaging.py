@@ -26,6 +26,16 @@ class BuildDependencyTests(unittest.TestCase):
         self.assertIn("/statements/upload", review_html)
         self.assertNotIn("/statements/import", review_html)
 
+    def test_transaction_ui_makes_money_direction_unambiguous(self):
+        review_html = (PROJECT_ROOT / "app" / "static" / "review.html").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("signedMoney", review_html)
+        self.assertIn("Money in", review_html)
+        self.assertIn("Money out", review_html)
+        self.assertIn("Receipt", review_html)
+        self.assertIn("Payment", review_html)
+
 
 class ConfigPathTests(unittest.TestCase):
     def test_override_creates_appdata_structure_without_reseeding_database(self):
