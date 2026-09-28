@@ -217,8 +217,15 @@ def register_cashbook(
 
     DEFAULT_ACTIVE_CASHBOOK.parent.mkdir(parents=True, exist_ok=True)
     temporary = DEFAULT_ACTIVE_CASHBOOK.with_suffix(".xls.tmp")
-    temporary.write_bytes(content)
-    temporary.replace(DEFAULT_ACTIVE_CASHBOOK)
+    try:
+        temporary.write_bytes(content)
+        temporary.replace(DEFAULT_ACTIVE_CASHBOOK)
+    except PermissionError as exc:
+        temporary.unlink(missing_ok=True)
+        raise CashbookSyncError(
+            "The managed cashbook is open in Excel or locked by another program. "
+            "Close it, then connect the cashbook again."
+        ) from exc
 
     profile = CashbookProfile(
         name="Active cashbook",
