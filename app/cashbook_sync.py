@@ -271,6 +271,37 @@ def list_cashbook_backups() -> list[dict]:
     return result
 
 
+def undo_latest_sync(db: Session) -> dict:
+    """Restore the pre-sync workbook only when its ledger can be safely reversed."""
+    profile = get_active_cashbook(db)
+    if profile is None:
+        raise CashbookSyncError("No cashbook is connected.")
+    latest = (
+        db.query(CashbookSync.backup_filename)
+        .filter(CashbookSync.cashbook_profile_id == profile.id)
+        .filter(CashbookSync.backup_filename.is_not(None))
+        .order_by(CashbookSync.synced_at.desc(), CashbookSync.id.desc())
+        .first()
+    )
+    if latest is None:
+        raise CashbookSyncError("There is no reversible sync in this cashbook.")
+    backup_name = latest[0]
+    all_syncs = db.query(CashbookSync).filter(CashbookSync.cashbook_profile_id == profile.id).all()
+    undo_syncs = [item for item in all_syncs if item.backup_filename == backup_name]
+    if len(undo_syncs) != len(all_syncs):
+        raise CashbookSyncError("Undo is available only for the first sync. Restore a named backup for older sync history.")
+    backup_path = CASHBOOK_BACKUP_DIR / backup_name
+    if not backup_path.is_file():
+        raise CashbookSyncError("The pre-sync backup is missing, so undo was stopped.")
+    path = Path(profile.file_path)
+    _cashbook_backup(path, "before-undo")
+    shutil.copy2(backup_path, path)
+    db.query(CashbookSync).filter(CashbookSync.id.in_([item.id for item in undo_syncs])).delete(synchronize_session=False)
+    profile.file_hash = sha256(path.read_bytes()).hexdigest()
+    db.commit()
+    return {"status": "undone", "backup": backup_name, "transactions_reverted": len(undo_syncs)}
+
+
 def _same_money(actual: object, expected: Decimal) -> bool:
     try:
         return abs(Decimal(str(actual)) - expected) <= Decimal("0.005")

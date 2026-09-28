@@ -55,6 +55,7 @@ from .cashbook_sync import (
     list_cashbook_backups,
     register_cashbook,
     sync_live_cashbook,
+    undo_latest_sync,
     preview_live_cashbook_sync,
     sync_state_for_transactions,
     sync_categories_from_layout,
@@ -564,6 +565,30 @@ def cashbook_sync_preview(db: Session = Depends(get_db)):
         return preview_live_cashbook_sync(db)
     except CashbookSyncError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/cashbook/reconciliation")
+def cashbook_reconciliation(db: Session = Depends(get_db)):
+    profile = get_active_cashbook(db)
+    if profile is None:
+        raise HTTPException(status_code=409, detail="No cashbook is connected.")
+    syncs = {item.transaction_id: item for item in db.query(CashbookSync).filter_by(cashbook_profile_id=profile.id)}
+    rows = []
+    for transaction in db.query(Transaction).order_by(Transaction.txn_date, Transaction.id):
+        sync = syncs.get(transaction.id)
+        rows.append({"transaction_id": transaction.id, "date": transaction.txn_date.isoformat(), "description": transaction.cashbook_narrative or transaction.payee_raw, "amount": str(transaction.amount), "direction": transaction.direction, "status": "synced" if sync else "not_synced", "sheet_name": sync.sheet_name if sync else None, "excel_row": sync.row_index + 1 if sync else None, "category": transaction.category.name if transaction.category else None})
+    return {"rows": rows, "synced": sum(1 for row in rows if row["status"] == "synced"), "total": len(rows)}
+
+
+@app.post("/cashbook/undo-last-sync")
+def undo_last_cashbook_sync(db: Session = Depends(get_db)):
+    try:
+        result = undo_latest_sync(db)
+    except CashbookSyncError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    record_audit_event(db, "cashbook.undo", entity_type="cashbook_profile", entity_id=get_active_cashbook(db).id, details=result)
+    db.commit()
+    return result
 
 
 @app.post("/cashbook/open")
