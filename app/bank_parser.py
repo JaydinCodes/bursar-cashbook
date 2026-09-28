@@ -67,12 +67,113 @@ def _parse_pdf(content: bytes) -> list[list[object]]:
             "Could not read the PDF statement"
         )
 
-    if not rows:
-        raise StatementParseError(
-            "No Transaction table could be extarcted from the pdf statement"
-        )
-
     return rows
+
+
+def _group_pdf_words(words: list[dict[str, object]]) -> list[list[dict[str, object]]]:
+    """Group OCR words into visual lines, preserving their page coordinates."""
+    lines: list[list[dict[str, object]]] = []
+    for word in sorted(words, key=lambda item: (float(item["top"]), float(item["x0"]))):
+        if not lines or float(word["top"]) - float(lines[-1][0]["top"]) > 4:
+            lines.append([word])
+        else:
+            lines[-1].append(word)
+    return lines
+
+
+def _parse_positioned_pdf(content: bytes) -> list[list[object]]:
+    """Read legacy Standard Bank PDFs whose selectable text has no table grid."""
+    import pdfplumber
+
+    normalized: list[list[object]] = [["Date", "Description", "Debit", "Credit", "Balance"]]
+    seen: set[tuple[str, str, str, str]] = set()
+    running_balance: Decimal | None = None
+
+    try:
+        with pdfplumber.open(io.BytesIO(content)) as pdf:
+            for page in pdf.pages:
+                lines = _group_pdf_words(page.extract_words(use_text_flow=False))
+                header = next(
+                    (
+                        line for line in lines
+                        if {str(word["text"]).lower() for word in line}.issuperset(
+                            {"details", "debit", "date", "balance"}
+                        )
+                    ),
+                    None,
+                )
+                if header is None:
+                    continue
+
+                x_positions = {str(word["text"]).lower(): float(word["x0"]) for word in header}
+                fee_x = x_positions.get("fee")
+                debit_x = x_positions["debit"]
+                date_x = x_positions["date"]
+                balance_x = x_positions["balance"]
+                credit_x = x_positions.get("credit", date_x - 84)
+                details_end = fee_x if fee_x is not None else debit_x
+                previous: list[object] | None = None
+
+                for line in lines:
+                    line_top = float(line[0]["top"])
+                    if line_top <= float(header[0]["top"]):
+                        continue
+
+                    by_column = {
+                        "details": [word for word in line if float(word["x0"]) < details_end - 2],
+                        "debit": [word for word in line if debit_x - 8 <= float(word["x0"]) < credit_x - 8],
+                        "credit": [word for word in line if credit_x - 8 <= float(word["x0"]) < date_x - 8],
+                        "date": [word for word in line if date_x - 8 <= float(word["x0"]) < balance_x - 8],
+                        "balance": [word for word in line if float(word["x0"]) >= balance_x - 8],
+                    }
+                    date_text = " ".join(str(word["text"]) for word in by_column["date"])
+                    balance_text = " ".join(str(word["text"]) for word in by_column["balance"])
+                    date_match = re.search(r"\b(20\d{6})\b", date_text)
+                    balance_match = re.search(r"[+-]?\d[\d,]*\.\d{2}", balance_text)
+
+                    if date_match and balance_match:
+                        debit_match = re.search(r"[+-]?\d[\d,]*\.\d{2}", " ".join(str(word["text"]) for word in by_column["debit"]))
+                        credit_match = re.search(r"[+-]?\d[\d,]*\.\d{2}", " ".join(str(word["text"]) for word in by_column["credit"]))
+                        description = " ".join(str(word["text"]) for word in by_column["details"]).strip()
+                        description = re.sub(r"^\d+\s+", "", description)
+                        debit = (debit_match.group(0) if debit_match else "0.00").replace(",", "")
+                        credit = (credit_match.group(0) if credit_match else "0.00").replace(",", "")
+                        balance = balance_match.group(0).replace(",", "")
+                        debit_amount = abs(Decimal(debit))
+                        credit_amount = abs(Decimal(credit))
+                        expected_balance = (
+                            running_balance + credit_amount - debit_amount
+                            if running_balance is not None
+                            else None
+                        )
+                        # OCR occasionally replaces a leading balance digit with
+                        # a replacement glyph. Recover only when the visible
+                        # numeric suffix agrees with the independently derived
+                        # running balance; otherwise reconciliation still blocks
+                        # the statement.
+                        if (
+                            expected_balance is not None
+                            and balance_text.strip()
+                            and balance_text.strip()[0] not in "+-0123456789"
+                            and format(expected_balance, "f").endswith(balance)
+                        ):
+                            balance = format(expected_balance, "f")
+                        identity = (date_match.group(1), debit, credit, balance)
+                        running_balance = Decimal(balance)
+                        if identity in seen:
+                            previous = None
+                            continue
+                        seen.add(identity)
+                        previous = [date_match.group(1), description, str(debit_amount) if debit_amount else "", str(credit_amount) if credit_amount else "", balance]
+                        normalized.append(previous)
+                    elif previous is not None:
+                        continuation = " ".join(str(word["text"]) for word in by_column["details"]).strip()
+                        if continuation and not continuation.lower().startswith(("date", "page")):
+                            previous[1] = f"{previous[1]} {continuation}".strip()
+    except Exception as exc:
+        raise StatementParseError("Could not read the positioned PDF statement") from exc
+
+    return normalized if len(normalized) > 1 else []
 
 
 PDF_DATE_RE = re.compile(
@@ -343,6 +444,7 @@ def _parse_date(value: object, *, excel_datemode: int = 0) -> date:
         "%d %b %Y",
         "%d %B %Y",
         "%d %b %y",       # Standard Bank PDF: 30 Jun 26
+        "%Y%m%d",         # Legacy Standard Bank PDF: 20210625
     ):
         try:
             return datetime.strptime(raw, fmt).date()
@@ -537,6 +639,13 @@ def parse_statement(
         rows = [sheet.row_values(index) for index in range(sheet.nrows)]
     elif extension == "pdf":
         rows = _parse_pdf(content)
+        if not rows:
+            rows = _parse_positioned_pdf(content)
+            if not rows:
+                raise StatementParseError(
+                    "No transaction table could be extracted from the PDF statement."
+                )
+            return parse_rows(rows)
         rows = _normalize_pdf_rows(rows)
         return parse_rows(rows)
     else:

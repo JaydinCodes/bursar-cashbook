@@ -8,6 +8,18 @@ from pathlib import Path
 from unittest.mock import patch
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+class BuildDependencyTests(unittest.TestCase):
+    def test_pdf_parser_dependency_is_included_in_runtime_and_bundle(self):
+        requirements = (PROJECT_ROOT / "requirements.txt").read_text(encoding="utf-8")
+        spec = (PROJECT_ROOT / "BursarCashbook.spec").read_text(encoding="utf-8")
+
+        self.assertIn("pdfplumber", requirements)
+        self.assertIn('"pdfplumber"', spec)
+
+
 class ConfigPathTests(unittest.TestCase):
     def test_override_creates_appdata_structure_without_reseeding_database(self):
         import app.config as config

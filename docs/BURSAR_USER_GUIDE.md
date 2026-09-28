@@ -15,7 +15,7 @@
 4. Open **Transactions** and review any items that need a category.
 5. Open **Cashbook**, select **Sync now**, then select **Open in Excel** to inspect the updated live cashbook.
 
-The application checks that the statement reconciles before importing it. It does not import a transaction twice, and it does not write an approved transaction twice.
+The application checks that the statement reconciles before importing it. It does not import a transaction twice, and it does not write an approved transaction twice. Use the bank's downloaded CSV, XLS, XLSX, or text-searchable PDF statement. A scanned/image-only PDF cannot be imported because its transaction details cannot be safely verified.
 
 ## If Excel says the cashbook is open
 

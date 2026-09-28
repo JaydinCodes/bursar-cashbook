@@ -3,7 +3,7 @@
 # development-only packages and unrelated repository files cannot enter a build.
 datas = [("app/static", "app/static")]
 binaries = []
-hiddenimports = ["app.main", "multipart.multipart", "xlrd", "xlutils.copy", "webview", "webview.platforms.winforms"]
+hiddenimports = ["app.main", "multipart.multipart", "pdfplumber", "xlrd", "xlutils.copy", "webview", "webview.platforms.winforms"]
 
 a = Analysis(
     ["app/launcher.py"],
