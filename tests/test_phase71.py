@@ -85,6 +85,11 @@ class Phase71Tests(unittest.TestCase):
             self.assertEqual(db.query(Transaction).filter_by(direction="credit", status="pending").count(), 1)
         finally: db.close()
 
+    def test_compact_transaction_queue_allows_ten_entries_per_page(self):
+        response = self.client.get("/transactions/pending?page=1&page_size=10")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["page_size"], 10)
+
     def test_cashbook_actions_are_blocked_before_registration(self):
         self.assertEqual(self.client.get("/cashbook/open").status_code, 405)
         opened = self.client.post("/cashbook/open")

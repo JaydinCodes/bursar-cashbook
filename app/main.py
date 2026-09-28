@@ -1320,7 +1320,7 @@ def _transaction_review_item(transaction: Transaction, matching_count: int = 0) 
 @app.get("/transactions/pending")
 def pending_transactions(
     page: int | None = Query(None, ge=1),
-    page_size: int = Query(25, ge=25, le=100),
+    page_size: int = Query(25, ge=10, le=100),
     search: str | None = Query(None, max_length=200),
     status: str = Query("needs_classification"),
     db: Session = Depends(get_db),

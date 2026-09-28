@@ -71,7 +71,7 @@
   const directionLabel=direction=>direction==='credit'?'Money in · Receipt':'Money out · Payment';
   const signedMoney=transaction=>(transaction.direction==='credit'?'+':'−')+money(transaction.amount);
   const escapeHtml=value=>String(value??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
-  async function api(url,options={}){const response=await fetch(url,options);let data;try{data=await response.json()}catch{data={}}if(!response.ok)throw new Error(data.detail||'This action could not be completed. Please try again.');return data}
+  async function api(url,options={}){const response=await fetch(url,options);let data;try{data=await response.json()}catch{data={}}if(!response.ok){const detail=Array.isArray(data.detail)?data.detail.map(item=>item.msg||'Invalid request').join(' '):(data.detail||'This action could not be completed. Please try again.');throw new Error(detail)}return data}
   function toast(message,type='info'){const el=$('toast');el.textContent=message;el.className='toast-'+type;el.style.display='block';clearTimeout(toast.timer);toast.timer=setTimeout(()=>el.style.display='none',5200)}
   function setBusy(button,busy,label){if(!button)return;button.disabled=busy;if(busy){button.dataset.label=button.textContent;button.textContent=label||'Working…'}else if(button.dataset.label)button.textContent=button.dataset.label}
   function showModal(id){$(id).classList.add('open')} function closeModal(id){$(id).classList.remove('open')}
