@@ -179,6 +179,22 @@ def _year_bounds(year: int) -> tuple[date, date]:
     return date(year, 1, 1), date(year + 1, 1, 1)
 
 
+def _resolve_working_year(db: Session, year: int | None) -> int:
+    latest = db.query(Transaction.txn_date).order_by(Transaction.txn_date.desc()).first()
+    latest_year = latest[0].year if latest else date.today().year
+    if year is None:
+        return latest_year
+    if year == date.today().year:
+        start, end = _year_bounds(year)
+        has_current_year_transactions = db.query(Transaction.id).filter(
+            Transaction.txn_date >= start,
+            Transaction.txn_date < end,
+        ).first()
+        if not has_current_year_transactions:
+            return latest_year
+    return year
+
+
 def _ensure_year_ready_for_export(db: Session, year: int) -> None:
     start, end = _year_bounds(year)
     year_transactions = db.query(Transaction).filter(
@@ -707,10 +723,10 @@ def _cashbook_summary(db: Session, year: int) -> dict:
 
 @app.get("/cashbook/summary")
 def cashbook_summary(
-    year: int = Query(..., ge=2000, le=2100),
+    year: int | None = Query(None, ge=2000, le=2100),
     db: Session = Depends(get_db),
 ):
-    return _cashbook_summary(db, year)
+    return _cashbook_summary(db, _resolve_working_year(db, year))
 
 
 @app.get("/exports/summary", include_in_schema=False)
@@ -724,9 +740,10 @@ def deprecated_export_summary(
 
 @app.get("/cashbook/preview")
 def cashbook_preview(
-    year: int = Query(..., ge=2000, le=2100),
+    year: int | None = Query(None, ge=2000, le=2100),
     db: Session = Depends(get_db),
 ):
+    year = _resolve_working_year(db, year)
     start, end = _year_bounds(year)
     transactions = (
         db.query(Transaction)

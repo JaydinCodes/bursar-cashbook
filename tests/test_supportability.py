@@ -2,6 +2,7 @@ import json
 import re
 import tempfile
 import unittest
+from datetime import date
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
@@ -111,6 +112,22 @@ class SupportabilityApiTests(unittest.TestCase):
             self.assertEqual(db.query(AuditEvent).count(), 0)
         finally:
             db.close()
+
+    def test_current_year_summary_falls_back_to_latest_statement_year(self):
+        content = (
+            "Transaction Date,Description,Debit,Credit,Balance\n"
+            "01/08/2021,TEST SUPPLIER,100.00,,900.00\n"
+        ).encode()
+        response = self.client.post(
+            "/statements/upload",
+            data={"bank": "Standard Bank"},
+            files={"file": ("2021-statement.csv", content, "text/csv")},
+        )
+        self.assertEqual(response.status_code, 201)
+
+        summary = self.client.get(f"/cashbook/summary?year={date.today().year}").json()
+
+        self.assertEqual(summary["year"], 2021)
 
     def test_review_updates_history_and_creates_audit_event(self):
         self._import_statement()

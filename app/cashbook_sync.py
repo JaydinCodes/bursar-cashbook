@@ -13,6 +13,7 @@ from decimal import Decimal
 from hashlib import sha256
 import json
 from pathlib import Path
+import re
 import shutil
 
 from sqlalchemy.orm import Session
@@ -32,10 +33,16 @@ from .workbook_inspector import inspect_workbook
 ADAPTER_NAME = "monthly_pc_rc_v1"
 FINAL_STATUSES = ("approved", "corrected")
 CASHBOOK_BACKUP_RETENTION = 20
+CASHBOOK_YEAR_RE = re.compile(r"(?<!\d)((?:19|20)\d{2})(?!\d)")
 
 
 class CashbookSyncError(ValueError):
     pass
+
+
+def _cashbook_year(source_filename: str) -> int | None:
+    match = CASHBOOK_YEAR_RE.search(source_filename)
+    return int(match.group(1)) if match else None
 
 
 def _is_ready_for_cashbook(transaction: Transaction) -> bool:
@@ -418,6 +425,15 @@ def sync_live_cashbook(
             "already_synced": 0,
         }
 
+    cashbook_year = _cashbook_year(profile.source_filename)
+    statement_years = sorted({transaction.txn_date.year for transaction in transactions})
+    if cashbook_year is not None and statement_years != [cashbook_year]:
+        years = ", ".join(str(year) for year in statement_years)
+        raise CashbookSyncError(
+            f"This is a {cashbook_year} cashbook and cannot receive transaction(s) "
+            f"from {years}. Connect the matching-year cashbook before synchronizing."
+        )
+
     try:
         source = xlrd.open_workbook(str(path), formatting_info=True)
     except Exception as exc:
@@ -651,6 +667,7 @@ def cashbook_status(db: Session) -> dict:
         "source_filename": profile.source_filename,
         "managed_path": profile.file_path,
         "adapter": profile.adapter,
+        "financial_year": _cashbook_year(profile.source_filename),
         "registered_at": profile.registered_at.isoformat() if profile.registered_at else None,
         "updated_at": profile.updated_at.isoformat() if profile.updated_at else None,
         "eligible_transactions": len(final_transactions),

@@ -11,6 +11,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app import cashbook_sync
 from app.cashbook_sync import (
+    _cashbook_year,
     _is_ready_for_cashbook,
     cashbook_status,
     register_cashbook,
@@ -33,6 +34,10 @@ class LiveCashbookStateTests(unittest.TestCase):
         result = sync_live_cashbook(self.db)
         self.assertEqual(result["status"], "not_registered")
         self.assertEqual(result["written"], 0)
+
+    def test_cashbook_year_is_read_from_a_year_labelled_filename(self):
+        self.assertEqual(_cashbook_year("2020 Cashbook with WCED template.xls"), 2020)
+        self.assertIsNone(_cashbook_year("school-cashbook.xls"))
 
     def test_current_category_uses_category_id_not_stale_relationship(self):
         first = Category(name="First", type="expense")
