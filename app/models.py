@@ -43,6 +43,7 @@ class Rule(Base):
     category_id = Column(Integer, ForeignKey("categories.id"), nullable=False)
     confidence = Column(Numeric(10, 8), nullable=False, default=1)
     hit_count = Column(Integer, nullable=False, default=0)
+    cashbook_narrative = Column(String, nullable=True)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
     category = relationship("Category")
@@ -117,6 +118,7 @@ class Transaction(Base):
 
     category_id = Column(Integer, ForeignKey("categories.id"), nullable=True)
     learned_category_id = Column(Integer, ForeignKey("categories.id"), nullable=True)
+    cashbook_narrative = Column(String, nullable=True)
     status = Column(String, nullable=False, default="pending")
 
     statement = relationship("Statement")
@@ -183,6 +185,7 @@ class CashbookSync(Base):
     sheet_name = Column(String, nullable=False)
     row_index = Column(Integer, nullable=False)
     category_column = Column(Integer, nullable=False)
+    backup_filename = Column(String, nullable=True, index=True)
     synced_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(
         DateTime,

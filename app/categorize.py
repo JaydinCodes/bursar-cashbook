@@ -486,6 +486,7 @@ def learn_from_correction(
     payee_raw: str,
     category_id: int,
     db: Session,
+    cashbook_narrative: str | None = None,
 ) -> Rule:
     """
     Add one learning vote for a bursar-approved classification.
@@ -514,6 +515,8 @@ def learn_from_correction(
         db.flush()
 
     selected.hit_count += 1
+    if cashbook_narrative:
+        selected.cashbook_narrative = cashbook_narrative.strip()
 
     _rebalance_rules(
         payee,

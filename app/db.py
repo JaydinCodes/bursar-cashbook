@@ -45,6 +45,14 @@ def init_db() -> None:
         columns = {row[1] for row in connection.execute(text("PRAGMA table_info(transactions)"))}
         if "merchant_key" not in columns:
             connection.execute(text("ALTER TABLE transactions ADD COLUMN merchant_key VARCHAR"))
+        if "cashbook_narrative" not in columns:
+            connection.execute(text("ALTER TABLE transactions ADD COLUMN cashbook_narrative VARCHAR"))
+        rule_columns = {row[1] for row in connection.execute(text("PRAGMA table_info(rules)"))}
+        if "cashbook_narrative" not in rule_columns:
+            connection.execute(text("ALTER TABLE rules ADD COLUMN cashbook_narrative VARCHAR"))
+        sync_columns = {row[1] for row in connection.execute(text("PRAGMA table_info(cashbook_syncs)"))}
+        if "backup_filename" not in sync_columns:
+            connection.execute(text("ALTER TABLE cashbook_syncs ADD COLUMN backup_filename VARCHAR"))
         rows = connection.execute(text("SELECT id, payee_raw FROM transactions WHERE merchant_key IS NULL OR merchant_key = ''")).all()
         for row in rows:
             connection.execute(text("UPDATE transactions SET merchant_key=:key WHERE id=:id"), {"key": merchant_key(row.payee_raw), "id": row.id})

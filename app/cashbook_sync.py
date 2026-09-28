@@ -321,7 +321,7 @@ def _write_new_transaction(writable_sheet, row: int, transaction: Transaction, l
     amount = float(transaction.amount)
     writable_sheet.write(row, layout.date_column, transaction.txn_date.day)
     if layout.payee_column is not None:
-        writable_sheet.write(row, layout.payee_column, transaction.payee_raw)
+        writable_sheet.write(row, layout.payee_column, transaction.cashbook_narrative or transaction.payee_raw)
     # A blank reference is intentionally left blank; no synthetic IMPORT/id is used.
     if layout.reference_column is not None and transaction.reference:
         writable_sheet.write(row, layout.reference_column, transaction.reference)
@@ -598,6 +598,7 @@ def sync_live_cashbook(
                     sheet_name=sheet_name,
                     row_index=row,
                     category_column=category_column,
+                    backup_filename=backup_path.name,
                 )
             )
 

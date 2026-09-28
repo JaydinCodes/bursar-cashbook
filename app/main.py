@@ -76,6 +76,7 @@ class ReviewDecision(BaseModel):
     category_id: int
     learn: bool = True
     apply_to_matches: bool = False
+    cashbook_narrative: str | None = None
 
 
 class CategoryCreate(BaseModel):
@@ -1118,6 +1119,14 @@ async def upload_statement(
         if suggested_category_id is not None:
             suggestion_confidence = confidence
 
+        learned_narrative = None
+        if suggested_category_id is not None:
+            narrative_rule = db.query(Rule).filter(
+                Rule.payee_pattern == merchant_key(raw.description),
+                Rule.category_id == suggested_category_id,
+            ).first()
+            learned_narrative = narrative_rule.cashbook_narrative if narrative_rule else None
+
         if suggestion_method == "exact":
             trusted_match = trusted_exact_match(
                 raw.description,
@@ -1143,6 +1152,7 @@ async def upload_statement(
             payee_raw=raw.description,
             payee_normalized=normalize_payee(raw.description),
             merchant_key=merchant_key(raw.description),
+            cashbook_narrative=learned_narrative,
             reference=raw.reference,
             balance_after=raw.balance_after,
             amount=raw.amount,
@@ -1259,6 +1269,7 @@ def _transaction_review_item(transaction: Transaction, matching_count: int = 0) 
             "txn_date": transaction.txn_date.isoformat(),
             "description": transaction.payee_raw,
             "payee_raw": transaction.payee_raw,
+            "cashbook_narrative": transaction.cashbook_narrative,
             "payee_display": display_payee(transaction.payee_raw),
             "merchant_key": transaction.merchant_key,
             "reference": transaction.reference,
@@ -1443,9 +1454,17 @@ def review_transaction(
             transaction.learned_category_id = category.id
             learning_changed = True
     elif decision.learn:
-        learn_from_correction(transaction.payee_raw, category.id, db)
+        learn_from_correction(
+            transaction.payee_raw,
+            category.id,
+            db,
+            cashbook_narrative=decision.cashbook_narrative,
+        )
         transaction.learned_category_id = category.id
         learning_changed = True
+
+    if decision.cashbook_narrative is not None:
+        transaction.cashbook_narrative = decision.cashbook_narrative.strip() or None
 
     if same_final_category and not learning_changed:
         try:
