@@ -1,4 +1,4 @@
-"""Windowed production entry point for Bursar Cashbook.
+"""Windowed production entry point for Ledgerly.
 
 This module owns the local-only Uvicorn server.  It is intentionally separate
 from FastAPI so normal developer ASGI usage remains possible.
@@ -18,7 +18,7 @@ from contextlib import closing
 
 import uvicorn
 
-from app.config import APP_DATA_DIR, LOG_DIR, ensure_application_directories
+from app.config import APP_DATA_DIR, LOG_DIR, ensure_application_directories, resource_path
 from app.errors import new_error_id
 from app.logging_config import logger
 
@@ -76,7 +76,7 @@ def shutdown_server(server: uvicorn.Server, thread: threading.Thread,
 
 def _show_startup_error(error_id: str) -> None:
     message = (
-        "Bursar Cashbook could not start. Please close any previous copy and try again.\n\n"
+        "Ledgerly could not start. Please close any previous copy and try again.\n\n"
         f"Error ID: {error_id}\n"
         f"Support files: {LOG_DIR}\n"
         f"Application data: {APP_DATA_DIR}"
@@ -84,7 +84,7 @@ def _show_startup_error(error_id: str) -> None:
     if sys.platform == "win32":
         try:
             import ctypes
-            ctypes.windll.user32.MessageBoxW(None, message, "Bursar Cashbook", 0x10)
+            ctypes.windll.user32.MessageBoxW(None, message, "Ledgerly", 0x10)
             return
         except Exception:
             pass
@@ -111,11 +111,11 @@ def _acquire_instance_lock():
 
 
 def _show_already_running() -> None:
-    message = "Bursar Cashbook is already running. Please use the open application window."
+    message = "Ledgerly is already running. Please use the open application window."
     if sys.platform == "win32":
         try:
             import ctypes
-            ctypes.windll.user32.MessageBoxW(None, message, "Bursar Cashbook", 0x40)
+            ctypes.windll.user32.MessageBoxW(None, message, "Ledgerly", 0x40)
             return
         except Exception:
             pass
@@ -150,8 +150,9 @@ def run() -> int:
 
         import webview
         webview.create_window(
-            "Bursar Cashbook", url, width=1400, height=900,
+            "Ledgerly", url, width=1400, height=900,
             min_size=(1100, 700), resizable=True,
+            icon=str(resource_path("assets", "ledgerly.ico")),
         )
         # webview.start blocks until the native application window closes.
         # The finally block then asks Uvicorn to shut down cleanly.

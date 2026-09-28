@@ -56,6 +56,21 @@ class BuildDependencyTests(unittest.TestCase):
         self.assertTrue(icon_css.is_file())
         self.assertTrue(icon_font.is_file())
 
+    def test_ledgerly_window_icon_is_included_in_the_bundle(self):
+        spec = (PROJECT_ROOT / "BursarCashbook.spec").read_text(encoding="utf-8")
+        self.assertTrue((PROJECT_ROOT / "assets" / "ledgerly.ico").is_file())
+        self.assertIn('icon="assets/ledgerly.ico"', spec)
+        self.assertIn('("assets/ledgerly.ico", "assets")', spec)
+
+    def test_review_queue_is_compact_and_category_is_chosen_in_review(self):
+        review_html = (PROJECT_ROOT / "app" / "static" / "review.html").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("pageSize:10", review_html)
+        self.assertIn("This is money ", review_html)
+        self.assertIn('id="decisionCategory"', review_html)
+        self.assertNotIn("<th>Suggested category</th>", review_html)
+
 
 class ConfigPathTests(unittest.TestCase):
     def test_override_creates_appdata_structure_without_reseeding_database(self):
@@ -137,4 +152,4 @@ class LauncherTests(unittest.TestCase):
         ), patch.object(launcher.webbrowser, "open") as browser:
             self.assertEqual(launcher.run(), 0)
         browser.assert_not_called()
-        self.assertEqual(calls[0][0][0], "Bursar Cashbook")
+        self.assertEqual(calls[0][0][0], "Ledgerly")

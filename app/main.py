@@ -66,7 +66,7 @@ from .presentation import display_payee, display_reference
 from .workbook_inspector import inspect_workbook
 from .merchant_identity import merchant_key
 
-app = FastAPI(title="Bursar Cashbook Automation", version=APP_VERSION)
+app = FastAPI(title="Ledgerly", version=APP_VERSION)
 REVIEW_PAGE = resource_path("app", "static", "review.html")
 HELP_PAGE = resource_path("app", "static", "help.html")
 app.mount("/static", StaticFiles(directory=resource_path("app", "static")), name="static")

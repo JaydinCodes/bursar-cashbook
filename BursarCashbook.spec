@@ -1,7 +1,7 @@
 # PyInstaller build definition. Run ``pyinstaller BursarCashbook.spec`` on Windows.
 # Application imports are analysed normally; keep this explicit list small so
 # development-only packages and unrelated repository files cannot enter a build.
-datas = [("app/static", "app/static")]
+datas = [("app/static", "app/static"), ("assets/ledgerly.ico", "assets")]
 binaries = []
 hiddenimports = ["app.main", "multipart.multipart", "pdfplumber", "xlrd", "xlutils.copy", "webview", "webview.platforms.winforms"]
 
@@ -20,5 +20,6 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz, a.scripts, a.binaries, a.zipfiles, a.datas,
     name="BursarCashbook", console=False, debug=False,
+    icon="assets/ledgerly.ico",
     version="installer/version_info.txt",
 )
