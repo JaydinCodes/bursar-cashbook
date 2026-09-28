@@ -365,7 +365,8 @@ def preview_live_cashbook_sync(db: Session) -> dict:
             rows.append({"transaction_id": transaction.id, "date": transaction.txn_date.isoformat(),
                          "payee": transaction.payee_raw, "amount": str(transaction.amount),
                          "direction": transaction.direction, "sheet_name": sheet_name,
-                         "category": category.name, "row_index": next_rows[sheet_name]})
+                         "category": category.name, "row_index": next_rows[sheet_name],
+                         "narrative_field": "Details" if transaction.direction == "debit" else "From (Receipt Numbers)"})
             next_rows[sheet_name] += 1
         except (CashbookSyncError, WcedExportError, Exception) as exc:
             blocked.append({"transaction_id": transaction.id, "reason": str(exc)})

@@ -179,9 +179,9 @@ class LiveCashbookXlsIntegrationTests(unittest.TestCase):
         self.db.close()
         self.engine.dispose()
 
-    def test_sync_is_idempotent_and_correction_updates_same_row(self):
+    def test_sync_preserves_existing_rows_and_writes_payment_details_and_receipt_from(self):
         import xlrd
-        from app.wced_export import pc_column_categories
+        from app.wced_export import discover_sheet_layout, pc_column_categories
 
         source = xlrd.open_workbook(str(self.historical), formatting_info=True)
         jan_pc = source.sheet_by_name("Jan PC")
@@ -192,7 +192,11 @@ class LiveCashbookXlsIntegrationTests(unittest.TestCase):
 
         first = Category(name=first_name, type="expense")
         second = Category(name=second_name, type="expense")
-        self.db.add_all([first, second])
+        jan_rc = source.sheet_by_name("Jan RC")
+        receipt_layout = discover_sheet_layout(jan_rc, "credit")
+        receipt_name = next(iter(receipt_layout.category_columns))
+        receipt = Category(name=receipt_name, type="income")
+        self.db.add_all([first, second, receipt])
         self.db.flush()
 
         statement = Statement(
@@ -227,7 +231,21 @@ class LiveCashbookXlsIntegrationTests(unittest.TestCase):
             category_id=first.id,
             status="corrected",
         )
-        self.db.add(transaction)
+        receipt_transaction = Transaction(
+            statement_id=statement.id,
+            fingerprint="e" * 64,
+            source_row=3,
+            txn_date=date(2020, 1, 31),
+            payee_raw="PARENT SCHOOL FEE PAYMENT",
+            payee_normalized="PARENT SCHOOL FEE PAYMENT",
+            reference="CRD/NEW",
+            balance_after=Decimal("1000.00"),
+            amount=Decimal("125.00"),
+            direction="credit",
+            category_id=receipt.id,
+            status="corrected",
+        )
+        self.db.add_all([transaction, receipt_transaction])
         self.db.commit()
 
         with tempfile.TemporaryDirectory() as directory:
@@ -243,15 +261,16 @@ class LiveCashbookXlsIntegrationTests(unittest.TestCase):
                     content=self.historical.read_bytes(),
                 )
                 first_sync = sync_live_cashbook(self.db)
-                self.assertEqual(first_sync["written"], 1)
-                ledger = self.db.query(CashbookSync).one()
+                self.assertEqual(first_sync["written"], 2)
+                ledger = self.db.query(CashbookSync).filter_by(transaction_id=transaction.id).one()
+                receipt_ledger = self.db.query(CashbookSync).filter_by(transaction_id=receipt_transaction.id).one()
                 original_row = ledger.row_index
                 original_column = ledger.category_column
 
                 second_sync = sync_live_cashbook(self.db)
                 self.assertEqual(second_sync["written"], 0)
-                self.assertEqual(second_sync["already_synced"], 1)
-                self.assertEqual(self.db.query(CashbookSync).count(), 1)
+                self.assertEqual(second_sync["already_synced"], 2)
+                self.assertEqual(self.db.query(CashbookSync).count(), 2)
 
                 transaction.category_id = second.id
                 transaction.status = "corrected"
@@ -259,16 +278,26 @@ class LiveCashbookXlsIntegrationTests(unittest.TestCase):
                 correction = sync_live_cashbook(self.db, transaction_ids=[transaction.id])
                 self.assertEqual(correction["updated"], 1)
 
-                ledger = self.db.query(CashbookSync).one()
+                ledger = self.db.query(CashbookSync).filter_by(transaction_id=transaction.id).one()
                 self.assertEqual(ledger.row_index, original_row)
                 self.assertEqual(ledger.category_id, second.id)
                 self.assertNotEqual(ledger.category_column, original_column)
 
                 workbook = xlrd.open_workbook(str(live_path))
                 sheet = workbook.sheet_by_name("Jan PC")
+                self.assertEqual(sheet.cell_value(original_row, 2), "PHASE 6 TEST SUPPLIER")
                 self.assertEqual(sheet.cell_value(original_row, 3), 125.0)
                 self.assertEqual(sheet.cell_value(original_row, original_column), 0.0)
                 self.assertEqual(sheet.cell_value(original_row, ledger.category_column), 125.0)
+                receipt_sheet = workbook.sheet_by_name("Jan RC")
+                self.assertEqual(receipt_sheet.cell_value(receipt_ledger.row_index, 0), 31.0)
+                self.assertEqual(receipt_sheet.cell_value(receipt_ledger.row_index, 1), "PARENT SCHOOL FEE PAYMENT")
+                self.assertEqual(receipt_sheet.cell_value(receipt_ledger.row_index, 3), "CRD/NEW")
+                self.assertEqual(receipt_sheet.cell_value(receipt_ledger.row_index, 4), 125.0)
+                self.assertEqual(
+                    receipt_sheet.cell_value(receipt_ledger.row_index, receipt_ledger.category_column),
+                    125.0,
+                )
                 self.assertGreaterEqual(len(list(backup_dir.glob("cashbook-*.xls"))), 2)
 
 

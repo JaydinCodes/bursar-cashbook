@@ -36,6 +36,13 @@ class BuildDependencyTests(unittest.TestCase):
         self.assertIn("Receipt", review_html)
         self.assertIn("Payment", review_html)
 
+    def test_sync_preview_shows_the_cashbook_narrative_destination(self):
+        review_html = (PROJECT_ROOT / "app" / "static" / "review.html").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("Narrative column", review_html)
+        self.assertIn("narrative_field", review_html)
+
 
 class ConfigPathTests(unittest.TestCase):
     def test_override_creates_appdata_structure_without_reseeding_database(self):
