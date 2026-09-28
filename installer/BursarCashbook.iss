@@ -17,11 +17,14 @@ Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 UninstallDisplayName={#MyAppName}
-; Accounting data is in %LOCALAPPDATA%\BursarCashbook and is deliberately
-; neither installed nor deleted by this installer/uninstaller.
+; Accounting data is in %LOCALAPPDATA%\BursarCashbook and is not installed.
+; Uninstall removes the database so a later installation starts fresh.
 
 [Files]
 Source: "..\dist\BursarCashbook.exe"; DestDir: "{app}"; Flags: ignoreversion
+
+[UninstallDelete]
+Type: files; Name: "{localappdata}\BursarCashbook\data\cashbook.db*"
 
 [Icons]
 Name: "{autoprograms}\Bursar Cashbook"; Filename: "{app}\{#MyAppExeName}"

@@ -43,7 +43,7 @@ from .diagnostics import build_diagnostics_zip
 from .errors import new_error_id
 from .fingerprints import standard_bank_transaction_fingerprint
 from .logging_config import LOG_DIR, logger
-from .models import AuditEvent, CashbookSync, Category, Rule, Statement, Transaction
+from .models import AuditEvent, CashbookProfile, CashbookSync, Category, Rule, Statement, Transaction
 from .reconciliation import StatementReconciliationError, reconcile_statement
 from .version import APP_VERSION
 from .wced_export import cashbook_target_sheet
@@ -865,6 +865,25 @@ def delete_imported_statement(
         "statement_id": statement_id,
         "transactions_removed": deleted_transactions,
     }
+
+
+@app.post("/workspace/reset")
+def reset_workspace(db: Session = Depends(get_db)):
+    """Clear local application records without altering the Excel cashbook file."""
+    counts = {
+        "statements": db.query(Statement).count(),
+        "transactions": db.query(Transaction).count(),
+    }
+    db.query(CashbookSync).delete(synchronize_session=False)
+    db.query(Transaction).delete(synchronize_session=False)
+    db.query(Statement).delete(synchronize_session=False)
+    db.query(Rule).delete(synchronize_session=False)
+    db.query(Category).delete(synchronize_session=False)
+    db.query(CashbookProfile).delete(synchronize_session=False)
+    db.query(AuditEvent).delete(synchronize_session=False)
+    db.commit()
+    logger.warning("workspace_reset", extra=counts)
+    return {"status": "reset", **counts}
 
 
 @app.get("/audit/history")

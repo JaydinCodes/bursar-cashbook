@@ -96,6 +96,22 @@ class SupportabilityApiTests(unittest.TestCase):
         finally:
             db.close()
 
+    def test_workspace_reset_removes_all_local_database_records(self):
+        self._import_statement()
+        self.client.post("/categories", json={"name": "Stationery", "type": "expense"})
+
+        response = self.client.post("/workspace/reset")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "reset")
+        db = self.session_factory()
+        try:
+            self.assertEqual(db.query(Statement).count(), 0)
+            self.assertEqual(db.query(Transaction).count(), 0)
+            self.assertEqual(db.query(AuditEvent).count(), 0)
+        finally:
+            db.close()
+
     def test_review_updates_history_and_creates_audit_event(self):
         self._import_statement()
         category = self.client.post(
