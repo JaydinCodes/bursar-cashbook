@@ -18,7 +18,7 @@ from contextlib import closing
 
 import uvicorn
 
-from app.config import APP_DATA_DIR, LOG_DIR, ensure_application_directories, resource_path
+from app.config import APP_DATA_DIR, LOG_DIR, ensure_application_directories
 from app.errors import new_error_id
 from app.logging_config import logger
 
@@ -152,7 +152,6 @@ def run() -> int:
         webview.create_window(
             "Ledgerly", url, width=1400, height=900,
             min_size=(1100, 700), resizable=True,
-            icon=str(resource_path("assets", "ledgerly.ico")),
         )
         # webview.start blocks until the native application window closes.
         # The finally block then asks Uvicorn to shut down cleanly.

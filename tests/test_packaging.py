@@ -153,3 +153,4 @@ class LauncherTests(unittest.TestCase):
             self.assertEqual(launcher.run(), 0)
         browser.assert_not_called()
         self.assertEqual(calls[0][0][0], "Ledgerly")
+        self.assertNotIn("icon", calls[0][1])
