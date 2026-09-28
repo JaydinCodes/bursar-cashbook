@@ -19,6 +19,13 @@ class BuildDependencyTests(unittest.TestCase):
         self.assertIn("pdfplumber", requirements)
         self.assertIn('"pdfplumber"', spec)
 
+    def test_statement_import_ui_uses_the_backend_upload_route(self):
+        review_html = (PROJECT_ROOT / "app" / "static" / "review.html").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("/statements/upload", review_html)
+        self.assertNotIn("/statements/import", review_html)
+
 
 class ConfigPathTests(unittest.TestCase):
     def test_override_creates_appdata_structure_without_reseeding_database(self):
