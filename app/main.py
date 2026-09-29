@@ -60,8 +60,10 @@ from .version import APP_VERSION
 from .wced_export import cashbook_target_sheet
 from .cashbook_sync import (
     CashbookSyncError,
+    _cashbook_year,
     adopt_existing_cashbook_row,
     cashbook_status,
+    detected_cashbook_year,
     get_active_cashbook,
     inspect_cashbook,
     list_cashbook_backups,
@@ -439,6 +441,7 @@ def setup_status(db: Session = Depends(get_db)):
 async def register_live_cashbook(
     file: UploadFile = File(...),
     replace: bool = Form(False),
+    financial_year: int | None = Form(None),
     db: Session = Depends(get_db),
 ):
     filename = file.filename or "cashbook.xls"
@@ -453,10 +456,12 @@ async def register_live_cashbook(
 
     try:
         layout = inspect_cashbook(content)
+        detected_year = detected_cashbook_year(content)
         profile = register_cashbook(
             db,
             source_filename=filename,
             content=content,
+            financial_year=financial_year,
             replace=replace,
         )
     except CashbookSyncError as exc:
@@ -476,6 +481,7 @@ async def register_live_cashbook(
             "adapter": layout["adapter"],
             "sheet_count": layout["sheet_count"],
             "replace": replace,
+            "financial_year": profile.financial_year,
         },
     )
     db.commit()
@@ -489,6 +495,11 @@ async def register_live_cashbook(
     )
     return {
         "cashbook": cashbook_status(db),
+        "year_detection": {
+            "detected_year": detected_year,
+            "filename_suggestion": _cashbook_year(filename),
+            "confirmed_year": profile.financial_year,
+        },
         "layout": {
             "adapter": layout["adapter"],
             "sheet_count": layout["sheet_count"],

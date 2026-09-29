@@ -175,6 +175,11 @@ def init_db() -> None:
         sync_columns = {row[1] for row in connection.execute(text("PRAGMA table_info(cashbook_syncs)"))}
         if "backup_filename" not in sync_columns:
             connection.execute(text("ALTER TABLE cashbook_syncs ADD COLUMN backup_filename VARCHAR"))
+        profile_columns = {row[1] for row in connection.execute(text("PRAGMA table_info(cashbook_profiles)"))}
+        if "financial_year" not in profile_columns:
+            # Existing profiles are deliberately left unconfirmed.  A later
+            # sync refuses them until a bursar reconnects/confirms the year.
+            connection.execute(text("ALTER TABLE cashbook_profiles ADD COLUMN financial_year INTEGER"))
         rows = connection.execute(text("SELECT id, payee_raw FROM transactions WHERE merchant_key IS NULL OR merchant_key = ''")).all()
         for row in rows:
             connection.execute(text("UPDATE transactions SET merchant_key=:key WHERE id=:id"), {"key": merchant_key(row.payee_raw), "id": row.id})

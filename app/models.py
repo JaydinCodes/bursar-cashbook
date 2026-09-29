@@ -147,6 +147,9 @@ class CashbookProfile(Base):
     source_filename = Column(String, nullable=False)
     file_path = Column(String, nullable=False)
     file_hash = Column(String(64), nullable=False)
+    # Explicitly confirmed accounting year.  Do not infer this at sync time
+    # from a mutable filename.
+    financial_year = Column(Integer, nullable=True, index=True)
     layout_json = Column(Text, nullable=False, default="{}")
     active = Column(Boolean, nullable=False, default=True, index=True)
     registered_at = Column(DateTime, server_default=func.now(), nullable=False)

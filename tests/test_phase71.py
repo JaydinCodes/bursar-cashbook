@@ -178,6 +178,7 @@ class Phase71Tests(unittest.TestCase):
         workbook = Path(__file__).parents[1] / "data" / "2020_cashbook.xls"
         response = self.client.post(
             "/cashbook/register",
+            data={"financial_year": "2020"},
             files={"file": ("cashbook.xls", workbook.read_bytes(), "application/vnd.ms-excel")},
         )
         self.assertEqual(response.status_code, 201)
@@ -194,6 +195,7 @@ class Phase71Tests(unittest.TestCase):
         workbook = Path(__file__).parents[1] / "data" / "2020_cashbook.xls"
         registered = self.client.post(
             "/cashbook/register",
+            data={"financial_year": "2020"},
             files={"file": ("cashbook.xls", workbook.read_bytes(), "application/vnd.ms-excel")},
         )
         self.assertEqual(registered.status_code, 201)

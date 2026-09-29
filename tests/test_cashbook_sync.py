@@ -255,7 +255,7 @@ class LiveCashbookXlsIntegrationTests(unittest.TestCase):
             with patch.object(cashbook_sync, "DEFAULT_ACTIVE_CASHBOOK", live_path), patch.object(
                 cashbook_sync, "CASHBOOK_BACKUP_DIR", backup_dir
             ):
-                register_cashbook(self.db, source_filename="2020 cashbook.xls", content=content)
+                register_cashbook(self.db, source_filename="2020 cashbook.xls", content=content, financial_year=2020)
                 before = live_path.read_bytes()
                 preview = cashbook_sync.preview_live_cashbook_sync(self.db)
                 self.assertFalse(preview["ready"])
@@ -287,7 +287,7 @@ class LiveCashbookXlsIntegrationTests(unittest.TestCase):
             with patch.object(cashbook_sync, "DEFAULT_ACTIVE_CASHBOOK", root / "active.xls"), patch.object(
                 cashbook_sync, "CASHBOOK_BACKUP_DIR", root / "backups"
             ):
-                register_cashbook(self.db, source_filename="2020 cashbook.xls", content=content)
+                register_cashbook(self.db, source_filename="2020 cashbook.xls", content=content, financial_year=2020)
                 transaction.txn_date = date(2020, 1, 28); self.db.commit()
                 with self.assertRaisesRegex(cashbook_sync.CashbookSyncError, "different transaction date"):
                     adopt_existing_cashbook_row(self.db, transaction_id=transaction.id, row_index=row)
@@ -298,13 +298,31 @@ class LiveCashbookXlsIntegrationTests(unittest.TestCase):
                 with self.assertRaisesRegex(cashbook_sync.CashbookSyncError, "not allocated"):
                     adopt_existing_cashbook_row(self.db, transaction_id=transaction.id, row_index=row)
 
+    def test_confirmed_profile_year_not_filename_controls_sync(self):
+        first, _ = self._cashbook_categories()
+        transaction = self._transaction(first, "j", day=28)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(cashbook_sync, "DEFAULT_ACTIVE_CASHBOOK", root / "active.xls"), patch.object(
+                cashbook_sync, "CASHBOOK_BACKUP_DIR", root / "backups"
+            ):
+                with self.assertRaisesRegex(cashbook_sync.CashbookSyncError, "Confirm the cashbook accounting year"):
+                    register_cashbook(self.db, source_filename="2020 Cashbook.xls", content=self.historical.read_bytes())
+                profile = register_cashbook(
+                    self.db, source_filename="Cashbook.xls", content=self.historical.read_bytes(), financial_year=2020,
+                )
+                self.assertEqual(profile.financial_year, 2020)
+                transaction.txn_date = date(2021, 1, 28); self.db.commit()
+                with self.assertRaisesRegex(cashbook_sync.CashbookSyncError, "cannot receive transaction"):
+                    sync_live_cashbook(self.db)
+
     def test_sync_then_undo_reverts_only_that_batch(self):
         first, _ = self._cashbook_categories()
         transaction = self._transaction(first, "a")
         with tempfile.TemporaryDirectory() as directory:
             first_patch, backup_patch = self._registered_cashbook(Path(directory))
             with first_patch, backup_patch:
-                register_cashbook(self.db, source_filename="2020 cashbook.xls", content=self.historical.read_bytes())
+                register_cashbook(self.db, source_filename="2020 cashbook.xls", content=self.historical.read_bytes(), financial_year=2020)
                 synced = sync_live_cashbook(self.db)
                 self.assertEqual(synced["written"], 1)
                 undone = undo_latest_sync(self.db)
@@ -320,7 +338,7 @@ class LiveCashbookXlsIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             first_patch, backup_patch = self._registered_cashbook(Path(directory))
             with first_patch, backup_patch:
-                register_cashbook(self.db, source_filename="2020 cashbook.xls", content=self.historical.read_bytes())
+                register_cashbook(self.db, source_filename="2020 cashbook.xls", content=self.historical.read_bytes(), financial_year=2020)
                 sync_one = sync_live_cashbook(self.db, transaction_ids=[one.id])
                 sync_two = sync_live_cashbook(self.db, transaction_ids=[two.id])
                 undo_latest_sync(self.db)
@@ -335,7 +353,7 @@ class LiveCashbookXlsIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             first_patch, backup_patch = self._registered_cashbook(Path(directory))
             with first_patch, backup_patch:
-                register_cashbook(self.db, source_filename="2020 cashbook.xls", content=self.historical.read_bytes())
+                register_cashbook(self.db, source_filename="2020 cashbook.xls", content=self.historical.read_bytes(), financial_year=2020)
                 sync_live_cashbook(self.db)
                 prior = self.db.query(CashbookSync).filter_by(transaction_id=transaction.id).one()
                 prior_column = prior.category_column
@@ -353,7 +371,7 @@ class LiveCashbookXlsIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             first_patch, backup_patch = self._registered_cashbook(Path(directory))
             with first_patch, backup_patch:
-                register_cashbook(self.db, source_filename="2020 cashbook.xls", content=self.historical.read_bytes())
+                register_cashbook(self.db, source_filename="2020 cashbook.xls", content=self.historical.read_bytes(), financial_year=2020)
                 result = sync_live_cashbook(self.db)
                 (Path(directory) / "cashbook_backups" / result["backup"]).unlink()
                 with self.assertRaisesRegex(cashbook_sync.CashbookSyncError, "pre-sync backup is missing"):
@@ -366,7 +384,7 @@ class LiveCashbookXlsIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             first_patch, backup_patch = self._registered_cashbook(Path(directory))
             with first_patch, backup_patch:
-                register_cashbook(self.db, source_filename="2020 cashbook.xls", content=self.historical.read_bytes())
+                register_cashbook(self.db, source_filename="2020 cashbook.xls", content=self.historical.read_bytes(), financial_year=2020)
                 sync_live_cashbook(self.db)
                 # Simulate a restart: discard the session and reopen against the same durable database.
                 self.db.close()
@@ -456,6 +474,7 @@ class LiveCashbookXlsIntegrationTests(unittest.TestCase):
                     self.db,
                     source_filename="school-cashbook.xls",
                     content=self.historical.read_bytes(),
+                    financial_year=2020,
                 )
                 first_sync = sync_live_cashbook(self.db)
                 self.assertEqual(first_sync["written"], 2)

@@ -52,6 +52,26 @@ def _cashbook_year(source_filename: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def detected_cashbook_year(content: bytes) -> int | None:
+    """Return a year only when workbook labels provide one unambiguous value.
+
+    Month/day capture sheets commonly have no year at all.  Their filename is
+    deliberately not evidence: it is shown as a suggestion to the bursar,
+    never persisted automatically.
+    """
+    xlrd, _ = _require_xls_dependencies()
+    try:
+        workbook = xlrd.open_workbook(file_contents=content)
+    except Exception as exc:
+        raise CashbookSyncError("The selected cashbook is not a readable legacy .xls workbook.") from exc
+    years: set[int] = set()
+    for sheet in workbook.sheets():
+        for row in range(sheet.nrows):
+            for column in range(sheet.ncols):
+                years.update(int(value) for value in CASHBOOK_YEAR_RE.findall(str(sheet.cell_value(row, column))))
+    return next(iter(years)) if len(years) == 1 else None
+
+
 def _is_ready_for_cashbook(transaction: Transaction) -> bool:
     return transaction.status in {"approved", "corrected"}
 
@@ -198,9 +218,26 @@ def register_cashbook(
     *,
     source_filename: str,
     content: bytes,
+    financial_year: int | None = None,
     replace: bool = False,
 ) -> CashbookProfile:
     layout = inspect_cashbook(content)
+    reliable_year = detected_cashbook_year(content)
+    if financial_year is None:
+        if reliable_year is None:
+            suggestion = _cashbook_year(source_filename)
+            hint = f" Suggested year from filename: {suggestion}." if suggestion else ""
+            raise CashbookSyncError(
+                "Confirm the cashbook accounting year before connecting it."
+                + hint
+            )
+        financial_year = reliable_year
+    if not 2000 <= financial_year <= 2100:
+        raise CashbookSyncError("The confirmed cashbook accounting year is invalid.")
+    if reliable_year is not None and financial_year != reliable_year:
+        raise CashbookSyncError(
+            f"The confirmed year {financial_year} conflicts with the workbook label {reliable_year}."
+        )
     existing = get_active_cashbook(db)
 
     if existing is not None:
@@ -240,6 +277,7 @@ def register_cashbook(
         source_filename=source_filename,
         file_path=str(DEFAULT_ACTIVE_CASHBOOK.resolve()),
         file_hash=sha256(content).hexdigest(),
+        financial_year=financial_year,
         layout_json=json.dumps(layout, separators=(",", ":"), sort_keys=True),
         active=True,
     )
@@ -818,7 +856,11 @@ def sync_live_cashbook(
             "already_synced": 0,
         }
 
-    cashbook_year = _cashbook_year(profile.source_filename)
+    cashbook_year = profile.financial_year
+    if cashbook_year is None:
+        raise CashbookSyncError(
+            "This cashbook has no confirmed accounting year. Reconnect it and confirm the year before syncing."
+        )
     statement_years = sorted({transaction.txn_date.year for transaction in transactions})
     if cashbook_year is not None and statement_years != [cashbook_year]:
         years = ", ".join(str(year) for year in statement_years)
@@ -1146,7 +1188,7 @@ def cashbook_status(db: Session) -> dict:
         "source_filename": profile.source_filename,
         "managed_path": profile.file_path,
         "adapter": profile.adapter,
-        "financial_year": _cashbook_year(profile.source_filename),
+        "financial_year": profile.financial_year,
         "registered_at": profile.registered_at.isoformat() if profile.registered_at else None,
         "updated_at": profile.updated_at.isoformat() if profile.updated_at else None,
         "eligible_transactions": len(final_transactions),

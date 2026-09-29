@@ -98,6 +98,7 @@ class MainApiTests(unittest.TestCase):
             ):
                 registered = self.client.post(
                     "/cashbook/register",
+                    data={"financial_year": "2020"},
                     files={"file": ("2020 cashbook.xls", workbook.read_bytes(), "application/vnd.ms-excel")},
                 )
                 self.assertEqual(registered.status_code, 201)
