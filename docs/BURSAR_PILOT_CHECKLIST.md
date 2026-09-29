@@ -1,13 +1,14 @@
-# Bursar pilot acceptance checklist
+# Ledgerly bursar pilot checklist
 
-Use a **copy** of the current school cashbook and one completed school Standard Bank
-statement. Confirm installation, onboarding, category discovery, R0.00 reconciliation,
-references, classifications, and the pre-sync PC/RC placement plan.
+Use a copy of the cashbook, never the production workbook on the first pilot.
 
-After test sync, open the copy in Excel and verify PC/RC sheets, category and total
-columns, dates, descriptions, references, formulas, hidden/recon/budget sheets and any
-VBA. Compare every transaction and category total to the bursar's completed month.
+- [ ] Confirm the accounting year from the workbook, not only its filename.
+- [ ] Import a known statement and verify opening balance, debits, credits, closing balance and R0.00 difference.
+- [ ] Review every transaction; debit previews to PC and credit previews to RC.
+- [ ] Assign categories and clean narratives; preview before choosing **Sync now**.
+- [ ] Check Excel day, narrative, reference, total and category-allocation cells after sync.
+- [ ] Resolve a historical-match prompt by selecting the actual row and choosing **Already in cashbook**.
+- [ ] Re-import once to check duplicates, then exercise sync #1 / sync #2 / undo #2.
 
-Discuss split allocations and payment/receipt numbering before live use. Only after the
-bursar accepts the copy comparison should a backed-up live workbook be connected. Run
-the first agreed period in parallel with the existing manual verification process.
+XLS read/write validation and selected sync safeguards are automated. Installer,
+single-instance, Excel locking and a live parallel period remain manual Windows checks.
