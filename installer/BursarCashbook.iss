@@ -1,7 +1,7 @@
 ; Build after PyInstaller: ISCC installer\BursarCashbook.iss
 #define MyAppName "Ledgerly"
 #ifndef MyAppVersion
-  #define MyAppVersion "0.8.0-rc2"
+  #define MyAppVersion "0.8.0-rc3"
 #endif
 #define MyAppPublisher "Ledgerly"
 #define MyAppExeName "BursarCashbook.exe"
