@@ -191,7 +191,7 @@ class LiveCashbookXlsIntegrationTests(unittest.TestCase):
         self.db.add_all([first, second]); self.db.flush()
         return first, second
 
-    def _transaction(self, category, fingerprint, day=31):
+    def _transaction(self, category, fingerprint, day=31, amount=Decimal("100.00")):
         statement = Statement(
             bank="Standard Bank", source_filename=f"statement-{fingerprint}.csv", source_hash=fingerprint * 64,
             period_start=date(2020, 1, day), period_end=date(2020, 1, day), financial_year=2020,
@@ -203,7 +203,7 @@ class LiveCashbookXlsIntegrationTests(unittest.TestCase):
         transaction = Transaction(
             statement_id=statement.id, fingerprint=fingerprint * 64, source_row=2, txn_date=date(2020, 1, day),
             payee_raw=f"SUPPLIER {fingerprint}", payee_normalized=f"SUPPLIER {fingerprint}",
-            balance_after=Decimal("900.00"), amount=Decimal("100.00"), direction="debit",
+            balance_after=Decimal("900.00"), amount=amount, direction="debit",
             category_id=category.id, status="corrected",
         )
         self.db.add(transaction); self.db.commit()
@@ -333,8 +333,10 @@ class LiveCashbookXlsIntegrationTests(unittest.TestCase):
 
     def test_two_syncs_undoes_second_without_corrupting_first(self):
         first, _ = self._cashbook_categories()
-        one = self._transaction(first, "a")
-        two = self._transaction(first, "b")
+        # Use values absent from the historical fixture.  A same-day/same-
+        # amount row must now correctly stop sync for manual adoption.
+        one = self._transaction(first, "a", amount=Decimal("987.61"))
+        two = self._transaction(first, "b", amount=Decimal("987.62"))
         with tempfile.TemporaryDirectory() as directory:
             first_patch, backup_patch = self._registered_cashbook(Path(directory))
             with first_patch, backup_patch:
