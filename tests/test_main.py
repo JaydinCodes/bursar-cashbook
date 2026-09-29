@@ -84,7 +84,7 @@ class MainApiTests(unittest.TestCase):
         self.assertEqual(retired.status_code, 410)
 
     def test_excel_changes_only_after_explicit_sync_confirmation(self):
-        workbook = Path(__file__).parents[1] / "data" / "2020_cashbook.xls"
+        workbook = Path(__file__).parent / "fixtures" / "synthetic_wced_2020.xls"
         statement = (
             "Transaction Date,Details,Debit,Credit,Balance,Reference\n"
             "31/01/2020,CONTROLLED WORKFLOW SUPPLIER,100.00,,900.00,CONTROL-1\n"

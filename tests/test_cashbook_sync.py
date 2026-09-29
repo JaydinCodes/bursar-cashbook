@@ -168,7 +168,7 @@ class LiveCashbookStateTests(unittest.TestCase):
     "xlrd/xlutils not installed",
 )
 class LiveCashbookXlsIntegrationTests(unittest.TestCase):
-    historical = Path(__file__).parents[1] / "data" / "2020_cashbook.xls"
+    historical = Path(__file__).parent / "fixtures" / "synthetic_wced_2020.xls"
 
     def setUp(self):
         if not self.historical.is_file():

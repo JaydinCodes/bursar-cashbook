@@ -5,7 +5,7 @@ from app.workbook_inspector import column_letter, inspect_workbook
 
 
 class WorkbookInspectorTests(unittest.TestCase):
-    fixture = Path(__file__).parents[1] / "data" / "2020_cashbook.xls"
+    fixture = Path(__file__).parent / "fixtures" / "synthetic_wced_2020.xls"
 
     def setUp(self):
         if not self.fixture.exists(): self.skipTest("sanitized workbook fixture unavailable")

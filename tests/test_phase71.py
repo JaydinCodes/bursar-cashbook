@@ -175,7 +175,7 @@ class Phase71Tests(unittest.TestCase):
         self.assertEqual(self.client.get("/setup/status").json()["readiness"], "setup_required")
 
     def test_registration_exposes_connected_status_and_ready_state(self):
-        workbook = Path(__file__).parents[1] / "data" / "2020_cashbook.xls"
+        workbook = Path(__file__).parent / "fixtures" / "synthetic_wced_2020.xls"
         response = self.client.post(
             "/cashbook/register",
             data={"financial_year": "2020"},
@@ -192,7 +192,7 @@ class Phase71Tests(unittest.TestCase):
         self.assertEqual(self.client.get("/setup/status").json()["readiness"], "ready")
 
     def test_zero_work_sync_returns_up_to_date_after_registration(self):
-        workbook = Path(__file__).parents[1] / "data" / "2020_cashbook.xls"
+        workbook = Path(__file__).parent / "fixtures" / "synthetic_wced_2020.xls"
         registered = self.client.post(
             "/cashbook/register",
             data={"financial_year": "2020"},

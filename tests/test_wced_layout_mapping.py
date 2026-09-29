@@ -15,7 +15,7 @@ class WcedLayoutMappingTests(unittest.TestCase):
     def test_fixture_layouts_are_explicit_and_validated(self):
         try: import xlrd
         except ImportError: self.skipTest("xlrd unavailable")
-        workbook = xlrd.open_workbook(str(Path(__file__).parents[1] / "data" / "2020_cashbook.xls"))
+        workbook = xlrd.open_workbook(str(Path(__file__).parent / "fixtures" / "synthetic_wced_2020.xls"))
         pc = discover_sheet_layout(workbook.sheet_by_name("Aug PC"), "debit")
         rc = discover_sheet_layout(workbook.sheet_by_name("Aug RC"), "credit")
         self.assertEqual((pc.date_column, pc.payee_column, pc.total_column), (0, 2, 3))

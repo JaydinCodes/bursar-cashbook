@@ -18,7 +18,7 @@ from app.wced_export import (
     "xlrd/xlutils not installed",
 )
 class WcedExportTests(unittest.TestCase):
-    template = Path(__file__).parents[1] / "data" / "2020_cashbook.xls"
+    template = Path(__file__).parent / "fixtures" / "synthetic_wced_2020.xls"
 
     def setUp(self):
         if not self.template.exists():
@@ -43,11 +43,11 @@ class WcedExportTests(unittest.TestCase):
 
         workbook = xlrd.open_workbook(file_contents=content)
         sheet = workbook.sheet_by_name("Jan PC")
-        row = 46
+        row = 6
         self.assertEqual(sheet.cell_value(row, 0), 31.0)
         self.assertEqual(sheet.cell_value(row, 2), "TEST SUPPLIER")
         self.assertEqual(sheet.cell_value(row, 3), 125.50)
-        self.assertEqual(sheet.cell_value(row, 44), 125.50)
+        self.assertEqual(sheet.cell_value(row, 5), 125.50)
 
     def test_final_validation_reopens_and_checks_written_cells(self):
         result = build_wced_cashbook(
@@ -87,12 +87,12 @@ class WcedExportTests(unittest.TestCase):
 
         workbook = xlrd.open_workbook(file_contents=content)
         sheet = workbook.sheet_by_name("Jan RC")
-        row = 17
+        row = 7
         self.assertEqual(sheet.cell_value(row, 0), 31.0)
         self.assertEqual(sheet.cell_value(row, 1), "TEST RECEIPT")
         self.assertEqual(sheet.cell_value(row, 3), "")
         self.assertEqual(sheet.cell_value(row, 4), 250.00)
-        self.assertEqual(sheet.cell_value(row, 26), 250.00)
+        self.assertEqual(sheet.cell_value(row, 5), 250.00)
 
 
 if __name__ == "__main__":
