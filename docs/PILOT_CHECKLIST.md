@@ -1,6 +1,6 @@
 # Installed Application Pilot Checklist
 
-- [ ] Install `BursarCashbook-Setup.exe` and open **Bursar Cashbook** from the Desktop shortcut.
+- [ ] Install the Ledgerly setup program and open **Ledgerly** from the Desktop shortcut.
 - [ ] Confirm the browser opens automatically and no terminal window is shown.
 
 - [ ] Register a copy of the bursar's actual current cashbook.

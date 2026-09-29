@@ -51,3 +51,18 @@ runSync = async function(button) {
   } catch (error) { toast("Cashbook could not be checked. " + error.message, "error"); }
   finally { setBusy(button, false); }
 };
+
+// The persisted BursarCashbook path remains a compatibility identifier, but
+// no visible application wording should expose the former product name.
+function applyLedgerlyBranding() {
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+  nodes.forEach(node => {
+    node.nodeValue = node.nodeValue
+      .replaceAll("Bursar Cashbook", "Ledgerly")
+      .replaceAll("BursarCashbook application", "Ledgerly application");
+  });
+}
+applyLedgerlyBranding();
+new MutationObserver(applyLedgerlyBranding).observe(document.body, {childList: true, subtree: true});
