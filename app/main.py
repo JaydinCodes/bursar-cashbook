@@ -60,6 +60,7 @@ from .version import APP_VERSION
 from .wced_export import cashbook_target_sheet
 from .cashbook_sync import (
     CashbookSyncError,
+    adopt_existing_cashbook_row,
     cashbook_status,
     get_active_cashbook,
     inspect_cashbook,
@@ -100,6 +101,11 @@ class CategoryCreate(BaseModel):
 
 class RestoreBackupRequest(BaseModel):
     confirm: bool = False
+
+
+class AdoptCashbookRowRequest(BaseModel):
+    transaction_id: int
+    row_index: int
 
 
 @app.on_event("startup")
@@ -569,6 +575,34 @@ def cashbook_sync_preview(db: Session = Depends(get_db)):
         return preview_live_cashbook_sync(db)
     except CashbookSyncError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/cashbook/adopt-existing-row")
+def adopt_existing_row(
+    request: AdoptCashbookRowRequest,
+    db: Session = Depends(get_db),
+):
+    """Explicitly link one bursar-confirmed historical workbook row.
+
+    This route never opens a writable workbook and never changes Excel bytes.
+    """
+    try:
+        result = adopt_existing_cashbook_row(
+            db,
+            transaction_id=request.transaction_id,
+            row_index=request.row_index,
+        )
+    except CashbookSyncError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    record_audit_event(
+        db,
+        "cashbook.historical_row_adopted",
+        entity_type="transaction",
+        entity_id=request.transaction_id,
+        details=result,
+    )
+    db.commit()
+    return result
 
 
 @app.get("/cashbook/reconciliation")

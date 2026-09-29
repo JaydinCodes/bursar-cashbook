@@ -379,6 +379,290 @@ def _validate_existing_synced_row(sheet, sync: CashbookSync, transaction: Transa
             "Automatic correction was stopped."
         )
 
+def _normalize_cashbook_text(value: object) -> str:
+    """
+    Normalize workbook/bank text only for comparison.
+
+    We deliberately keep this conservative. Historical matching must never
+    decide two transactions are identical purely from fuzzy text.
+    """
+    text = str(value or "").upper().strip()
+    text = re.sub(r"[^A-Z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+def adopt_existing_cashbook_row(
+    db: Session,
+    *,
+    transaction_id: int,
+    row_index: int,
+) -> dict:
+    """
+    Tell Ledgerly that an existing workbook row represents a transaction.
+
+    This does NOT write to the workbook.
+
+    It only creates Ledgerly's CashbookSync ledger record after validating
+    the row against the current transaction.
+    """
+    profile = get_active_cashbook(db)
+
+    if profile is None:
+        raise CashbookSyncError(
+            "No cashbook is connected. Connect a cashbook first."
+        )
+
+    transaction = db.get(Transaction, transaction_id)
+
+    if transaction is None:
+        raise CashbookSyncError(
+            f"Transaction {transaction_id} does not exist."
+        )
+
+    if not _is_ready_for_cashbook(transaction):
+        raise CashbookSyncError(
+            "Only approved or corrected transactions can be linked "
+            "to an existing cashbook row."
+        )
+
+    existing_sync = (
+        db.query(CashbookSync)
+        .filter(
+            CashbookSync.transaction_id == transaction.id,
+            CashbookSync.cashbook_profile_id == profile.id,
+        )
+        .one_or_none()
+    )
+
+    if existing_sync is not None:
+        raise CashbookSyncError(
+            "This transaction is already linked to the cashbook."
+        )
+
+    category = _current_category(db, transaction)
+
+    xlrd, _ = _require_xls_dependencies()
+    path = Path(profile.file_path)
+
+    if not path.is_file():
+        raise CashbookSyncError(
+            "The registered cashbook file is missing."
+        )
+
+    try:
+        workbook = xlrd.open_workbook(
+            str(path),
+            formatting_info=True,
+        )
+    except Exception as exc:
+        raise CashbookSyncError(
+            "The registered cashbook could not be opened."
+        ) from exc
+
+    sheet_name = cashbook_target_sheet(
+        transaction.txn_date,
+        transaction.direction,
+    )
+
+    try:
+        sheet = workbook.sheet_by_name(sheet_name)
+    except Exception as exc:
+        raise CashbookSyncError(
+            f"The cashbook does not contain {sheet_name}."
+        ) from exc
+
+    try:
+        layout = discover_sheet_layout(
+            sheet,
+            transaction.direction,
+        )
+    except WcedExportError as exc:
+        raise CashbookSyncError(str(exc)) from exc
+
+    if row_index < layout.start_row or row_index >= sheet.nrows:
+        raise CashbookSyncError(
+            "The selected cashbook row is outside the transaction area."
+        )
+
+    category_column = layout.category_columns.get(category.name)
+
+    if category_column is None:
+        raise CashbookSyncError(
+            f"Category {category.name!r} does not exist in {sheet_name}."
+        )
+
+    # 1. Day must match.
+    day_value = sheet.cell_value(
+        row_index,
+        layout.date_column,
+    )
+
+    try:
+        existing_day = int(float(day_value))
+    except (TypeError, ValueError) as exc:
+        raise CashbookSyncError(
+            "The selected row does not contain a valid transaction day."
+        ) from exc
+
+    if existing_day != transaction.txn_date.day:
+        raise CashbookSyncError(
+            "The selected cashbook row has a different transaction date."
+        )
+
+    # 2. Total amount must match.
+    if not _same_money(
+        sheet.cell_value(row_index, layout.total_column),
+        transaction.amount,
+    ):
+        raise CashbookSyncError(
+            "The selected cashbook row has a different total amount."
+        )
+
+    # 3. Selected transaction's category must already contain the amount.
+    #
+    # This protects against linking a transaction to the wrong existing row.
+    if not _same_money(
+        sheet.cell_value(row_index, category_column),
+        transaction.amount,
+    ):
+        raise CashbookSyncError(
+            "The selected row is not allocated to the transaction's "
+            "current category. Review the row or transaction category first."
+        )
+
+    sync = CashbookSync(
+        transaction_id=transaction.id,
+        cashbook_profile_id=profile.id,
+        category_id=category.id,
+        sheet_name=sheet_name,
+        row_index=row_index,
+        category_column=category_column,
+        # No Ledgerly write occurred, therefore there is no before-sync backup.
+        backup_filename=None,
+    )
+
+    db.add(sync)
+    db.commit()
+    db.refresh(sync)
+
+    return {
+        "status": "adopted",
+        "transaction_id": transaction.id,
+        "cashbook_sync_id": sync.id,
+        "sheet_name": sheet_name,
+        "row_index": row_index,
+        "excel_row": row_index + 1,
+        "message": (
+            "Existing cashbook row linked successfully. "
+            "Ledgerly will not append this transaction again."
+        ),
+    }
+
+def _historical_cashbook_matches(
+    sheet,
+    layout,
+    transaction: Transaction,
+    category: Category,
+) -> list[dict]:
+    """
+    Find rows already present in the workbook that could represent transaction.
+
+    A candidate requires:
+        - same monthly PC/RC sheet (already guaranteed by caller)
+        - same day
+        - same total amount
+
+    Category, narrative and reference are supporting evidence only.
+
+    IMPORTANT:
+    This function never automatically claims that a candidate is the same
+    transaction. It only detects possible duplicates.
+    """
+    matches: list[dict] = []
+
+    category_column = layout.category_columns.get(category.name)
+    if category_column is None:
+        return matches
+
+    wanted_narrative = _normalize_cashbook_text(
+        transaction.cashbook_narrative or transaction.payee_raw
+    )
+    wanted_reference = _normalize_cashbook_text(transaction.reference)
+
+    for row in range(layout.start_row, sheet.nrows):
+        day_value = sheet.cell_value(row, layout.date_column)
+
+        # Stop once the capture section reaches the monthly total row.
+        if str(day_value).strip().lower().startswith("total "):
+            break
+
+        try:
+            existing_day = int(float(day_value))
+        except (TypeError, ValueError):
+            continue
+
+        if existing_day != transaction.txn_date.day:
+            continue
+
+        existing_total = sheet.cell_value(row, layout.total_column)
+
+        if not _same_money(existing_total, transaction.amount):
+            continue
+
+        existing_narrative = ""
+        if layout.payee_column is not None:
+            existing_narrative = _normalize_cashbook_text(
+                sheet.cell_value(row, layout.payee_column)
+            )
+
+        existing_reference = ""
+        if layout.reference_column is not None:
+            existing_reference = _normalize_cashbook_text(
+                sheet.cell_value(row, layout.reference_column)
+            )
+
+        category_matches = _same_money(
+            sheet.cell_value(row, category_column),
+            transaction.amount,
+        )
+
+        narrative_matches = bool(
+            wanted_narrative
+            and existing_narrative
+            and wanted_narrative == existing_narrative
+        )
+
+        reference_matches = bool(
+            wanted_reference
+            and existing_reference
+            and wanted_reference == existing_reference
+        )
+
+        # Same day + amount always deserves review.
+        #
+        # Strong means we have additional evidence, but even a strong match
+        # should be confirmed by the bursar rather than silently adopted.
+        strong = (
+            category_matches
+            and (narrative_matches or reference_matches)
+        )
+
+        matches.append(
+            {
+                "row_index": row,
+                # Human-friendly Excel row number.
+                "excel_row": row + 1,
+                "day": existing_day,
+                "amount": f"{Decimal(str(existing_total)):.2f}",
+                "narrative": existing_narrative,
+                "reference": existing_reference or None,
+                "category_matches": category_matches,
+                "narrative_matches": narrative_matches,
+                "reference_matches": reference_matches,
+                "strength": "strong" if strong else "possible",
+            }
+        )
+
+    return matches
 
 def _current_category(db: Session, transaction: Transaction) -> Category:
     """Resolve the transaction's current category from its FK, not a cached relationship.
@@ -435,7 +719,13 @@ def preview_live_cashbook_sync(db: Session) -> dict:
         source = xlrd.open_workbook(str(profile.file_path), formatting_info=True)
     except Exception as exc:
         raise CashbookSyncError("The registered cashbook could not be opened.") from exc
-    rows, blocked, next_rows = [], [], {}
+    rows, blocked, historical_matches, next_rows = [], [], [], {}
+    synced_ids = {
+        row[0]
+        for row in db.query(CashbookSync.transaction_id)
+        .filter(CashbookSync.cashbook_profile_id == profile.id)
+        .all()
+    }
     for transaction in _eligible_transactions(db, None):
         try:
             category = _current_category(db, transaction)
@@ -444,6 +734,22 @@ def preview_live_cashbook_sync(db: Session) -> dict:
             layout = discover_sheet_layout(sheet, transaction.direction)
             if category.name not in layout.category_columns:
                 raise CashbookSyncError(f"{category.name} is not available in {sheet_name}. Review category mapping.")
+            # A transaction Ledgerly has never written must never be appended
+            # over a possible manually-entered historical transaction.  The
+            # match is deliberately returned for a bursar to decide on; it is
+            # never treated as proof of duplication.
+            if transaction.id not in synced_ids:
+                matches = _historical_cashbook_matches(
+                    sheet, layout, transaction, category
+                )
+                if matches:
+                    historical_matches.append({
+                        "type": "historical_match",
+                        "transaction_id": transaction.id,
+                        "sheet_name": sheet_name,
+                        "matches": matches,
+                    })
+                    continue
             if sheet_name not in next_rows:
                 next_rows[sheet_name] = first_empty_capture_row(sheet, layout)
             rows.append({"transaction_id": transaction.id, "date": transaction.txn_date.isoformat(),
@@ -459,7 +765,8 @@ def preview_live_cashbook_sync(db: Session) -> dict:
     for row in rows:
         item = summary.setdefault(row["sheet_name"], {"sheet_name": row["sheet_name"], "transaction_count": 0, "amount": Decimal("0")})
         item["transaction_count"] += 1; item["amount"] += Decimal(row["amount"])
-    return {"ready": not blocked, "transactions": rows, "blocked": blocked,
+    return {"ready": not blocked and not historical_matches, "transactions": rows,
+            "blocked": blocked, "historical_matches": historical_matches,
             "summary": [{**value, "amount": f'{value["amount"]:.2f}'} for value in summary.values()]}
 
 
@@ -535,6 +842,44 @@ def sync_live_cashbook(
             .all()
         )
     }
+
+    # Preflight before creating an xlutils copy, a backup, or a replacement
+    # file.  This is intentionally separate from the normal sync loop so one
+    # unresolved possible duplicate blocks the *entire* request atomically.
+    historical_matches: list[dict] = []
+    for transaction in transactions:
+        if transaction.id in sync_rows:
+            continue
+        category = _current_category(db, transaction)
+        sheet_name = cashbook_target_sheet(transaction.txn_date, transaction.direction)
+        try:
+            source_sheet = source.sheet_by_name(sheet_name)
+            layout = discover_sheet_layout(source_sheet, transaction.direction)
+        except WcedExportError as exc:
+            raise CashbookSyncError(str(exc)) from exc
+        except Exception as exc:
+            raise CashbookSyncError(f"The registered cashbook is missing {sheet_name}.") from exc
+        matches = _historical_cashbook_matches(source_sheet, layout, transaction, category)
+        if matches:
+            historical_matches.append({
+                "type": "historical_match",
+                "transaction_id": transaction.id,
+                "sheet_name": sheet_name,
+                "matches": matches,
+            })
+    if historical_matches:
+        return {
+            "status": "historical_match",
+            "message": (
+                "Possible existing cashbook rows were found. Select and confirm "
+                "'Already in cashbook' for the matching row, or resolve the "
+                "difference before syncing."
+            ),
+            "written": 0,
+            "updated": 0,
+            "already_synced": 0,
+            "historical_matches": historical_matches,
+        }
 
     next_rows: dict[str, int] = {}
     placements: list[WcedPlacement] = []

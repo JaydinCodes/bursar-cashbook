@@ -13,6 +13,7 @@ from app import cashbook_sync
 from app.cashbook_sync import (
     _cashbook_year,
     _is_ready_for_cashbook,
+    adopt_existing_cashbook_row,
     cashbook_status,
     register_cashbook,
     sync_live_cashbook,
@@ -213,6 +214,89 @@ class LiveCashbookXlsIntegrationTests(unittest.TestCase):
         return patch.object(cashbook_sync, "DEFAULT_ACTIVE_CASHBOOK", live_path), patch.object(
             cashbook_sync, "CASHBOOK_BACKUP_DIR", backup_dir
         )
+
+    def _historical_row_workbook(self, *, direction, category, day, amount,
+                                 narrative="HISTORICAL ENTRY", reference="HIST-REF"):
+        """Return a real XLS with a manually populated WCED capture row."""
+        import xlrd
+        from io import BytesIO
+        from xlutils.copy import copy as copy_workbook
+        from app.wced_export import cashbook_target_sheet, discover_sheet_layout, first_empty_capture_row
+
+        source = xlrd.open_workbook(str(self.historical), formatting_info=True)
+        sheet_name = cashbook_target_sheet(date(2020, 1, day), direction)
+        sheet = source.sheet_by_name(sheet_name)
+        layout = discover_sheet_layout(sheet, direction)
+        row = first_empty_capture_row(sheet, layout)
+        writable = copy_workbook(source)
+        target = writable.get_sheet(source.sheet_names().index(sheet_name))
+        target.write(row, layout.date_column, day)
+        if layout.payee_column is not None:
+            target.write(row, layout.payee_column, narrative)
+        if layout.reference_column is not None:
+            target.write(row, layout.reference_column, reference)
+        target.write(row, layout.total_column, float(amount))
+        target.write(row, layout.category_columns[category.name], float(amount))
+        output = BytesIO(); writable.save(output)
+        return output.getvalue(), sheet_name, row
+
+    def test_historical_row_blocks_append_and_adoption_does_not_mutate_workbook(self):
+        first, _ = self._cashbook_categories()
+        transaction = self._transaction(first, "h", day=30)
+        transaction.amount = Decimal("987654.32")
+        transaction.cashbook_narrative = "HISTORICAL ENTRY"
+        self.db.commit()
+        content, sheet_name, row = self._historical_row_workbook(
+            direction="debit", category=first, day=30, amount=transaction.amount,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            live_path, backup_dir = root / "active-cashbook.xls", root / "backups"
+            with patch.object(cashbook_sync, "DEFAULT_ACTIVE_CASHBOOK", live_path), patch.object(
+                cashbook_sync, "CASHBOOK_BACKUP_DIR", backup_dir
+            ):
+                register_cashbook(self.db, source_filename="2020 cashbook.xls", content=content)
+                before = live_path.read_bytes()
+                preview = cashbook_sync.preview_live_cashbook_sync(self.db)
+                self.assertFalse(preview["ready"])
+                self.assertEqual(preview["historical_matches"][0]["type"], "historical_match")
+                self.assertEqual(preview["historical_matches"][0]["sheet_name"], sheet_name)
+                blocked = sync_live_cashbook(self.db)
+                self.assertEqual(blocked["status"], "historical_match")
+                self.assertEqual(live_path.read_bytes(), before)
+                adopted = adopt_existing_cashbook_row(
+                    self.db, transaction_id=transaction.id, row_index=row,
+                )
+                self.assertEqual(adopted["status"], "adopted")
+                self.assertEqual(live_path.read_bytes(), before)
+                self.assertEqual(self.db.query(CashbookSync).count(), 1)
+                repeated = sync_live_cashbook(self.db)
+                self.assertEqual(repeated["written"], 0)
+                self.assertEqual(repeated["already_synced"], 1)
+
+    def test_historical_adoption_revalidates_date_amount_and_category(self):
+        first, second = self._cashbook_categories()
+        transaction = self._transaction(first, "i", day=29)
+        transaction.amount = Decimal("876543.21")
+        self.db.commit()
+        content, _, row = self._historical_row_workbook(
+            direction="debit", category=first, day=29, amount=transaction.amount,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(cashbook_sync, "DEFAULT_ACTIVE_CASHBOOK", root / "active.xls"), patch.object(
+                cashbook_sync, "CASHBOOK_BACKUP_DIR", root / "backups"
+            ):
+                register_cashbook(self.db, source_filename="2020 cashbook.xls", content=content)
+                transaction.txn_date = date(2020, 1, 28); self.db.commit()
+                with self.assertRaisesRegex(cashbook_sync.CashbookSyncError, "different transaction date"):
+                    adopt_existing_cashbook_row(self.db, transaction_id=transaction.id, row_index=row)
+                transaction.txn_date = date(2020, 1, 29); transaction.amount = Decimal("1.00"); self.db.commit()
+                with self.assertRaisesRegex(cashbook_sync.CashbookSyncError, "different total amount"):
+                    adopt_existing_cashbook_row(self.db, transaction_id=transaction.id, row_index=row)
+                transaction.amount = Decimal("876543.21"); transaction.category_id = second.id; self.db.commit()
+                with self.assertRaisesRegex(cashbook_sync.CashbookSyncError, "not allocated"):
+                    adopt_existing_cashbook_row(self.db, transaction_id=transaction.id, row_index=row)
 
     def test_sync_then_undo_reverts_only_that_batch(self):
         first, _ = self._cashbook_categories()
