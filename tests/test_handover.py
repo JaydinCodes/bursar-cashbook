@@ -42,7 +42,7 @@ class HandoverApiTests(unittest.TestCase):
     def test_help_page_is_available(self):
         response = self.client.get("/help")
         self.assertEqual(response.status_code, 200)
-        self.assertIn("Bursar Cashbook Help", response.text)
+        self.assertIn("Ledgerly Help", response.text)
 
     def test_version_bumped_for_handover(self):
         self.assertEqual(APP_VERSION, "0.8.0-rc2")
