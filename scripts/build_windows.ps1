@@ -26,6 +26,7 @@ if (-not $SkipTests) {
     }
 }
 
+python scripts/generate_version_info.py
 python -m PyInstaller --noconfirm --clean BursarCashbook.spec
 
 if ($LASTEXITCODE -ne 0) {
