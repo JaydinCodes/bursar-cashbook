@@ -127,5 +127,27 @@ class ImportStatementTests(unittest.TestCase):
                 content=content,
             )
 
+    def test_overlapping_statement_imports_only_new_transactions(self):
+        self.db.add_all([
+            Category(name="Stationery", type="expense"),
+            Category(name="Income", type="income"),
+        ])
+        self.db.commit()
+        first = (
+            b"Date,Description,Debit,Credit,Balance\n"
+            b"01/08/2026,STATIONERY SHOP,100.00,,900.00\n"
+            b"02/08/2026,CLIENT PAYMENT,,500.00,1400.00\n"
+        )
+        overlapping = (
+            b"Date,Description,Debit,Credit,Balance\n"
+            b"02/08/2026,CLIENT PAYMENT,,500.00,1400.00\n"
+            b"03/08/2026,SECOND PAYMENT,,200.00,1600.00\n"
+        )
+        import_statement(self.db, filename="first.csv", content=first)
+        second = import_statement(self.db, filename="overlap.csv", content=overlapping)
+        self.assertEqual(second.imported_transaction_count, 1)
+        self.assertEqual(second.duplicate_transaction_count, 1)
+        self.assertEqual(self.db.query(Transaction).count(), 3)
+
 if __name__ == "__main__":
     unittest.main()

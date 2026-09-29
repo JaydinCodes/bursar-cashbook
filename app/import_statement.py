@@ -8,6 +8,7 @@ from .bank_parser import parse_statement
 from .categorize import categorize
 from .models import Statement, Transaction
 from .merchant_identity import merchant_key
+from .fingerprints import standard_bank_transaction_fingerprint
 from .reconciliation import reconcile_statement
 
 
@@ -77,10 +78,9 @@ def import_statement(
     transactions_to_import = []
 
     for raw_transaction in parsed.transactions:
-        fingerprint = _transaction_fingerprint(
-            statement_hash=source_hash,
-            transaction=raw_transaction,
-        )
+        # Statement exports commonly overlap.  Transaction identity must not
+        # include the file hash or the same bank entry will be imported twice.
+        fingerprint = standard_bank_transaction_fingerprint(raw_transaction)
 
         existing_transaction = (
             db.query(Transaction)
@@ -171,29 +171,3 @@ def import_statement(
     return statement
 
 
-def _transaction_fingerprint(
-    statement_hash: str,
-    transaction,
-) -> str:
-    """
-    Create a stable identifier for a transaction.
-
-    The statement hash is included so the same transaction
-    appearing in different statements does not accidentally
-    collide.
-    """
-
-    raw = "|".join(
-        [
-            statement_hash,
-            str(transaction.txn_date),
-            transaction.description.strip().upper(),
-            str(transaction.amount),
-            transaction.direction,
-            str(transaction.balance_after),
-        ]
-    )
-
-    return hashlib.sha256(
-        raw.encode("utf-8")
-    ).hexdigest()
