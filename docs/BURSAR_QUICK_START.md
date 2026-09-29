@@ -1,6 +1,6 @@
-# Bursar Cashbook quick start
+# Ledgerly quick start
 
-1. Open Bursar Cashbook.
+1. Open Ledgerly.
 2. Import your Standard Bank statement.
 3. Review transactions requiring attention.
 4. Review the sync preview.

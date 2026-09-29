@@ -117,7 +117,7 @@ def build_diagnostics_zip(db: Session) -> bytes:
 
         archive.writestr(
             "README.txt",
-            "Bursar Cashbook diagnostic package\n"
+            "Ledgerly diagnostic package\n"
             "\n"
             "This package intentionally excludes full bank transaction descriptions, "
             "references, account numbers and complete statement data.\n",

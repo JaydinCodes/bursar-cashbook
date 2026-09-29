@@ -1,13 +1,13 @@
-# Bursar Cashbook
+# Ledgerly — School Cashbook Assistant
 
-Bursar Cashbook imports Standard Bank statements, reconciles them, helps the bursar classify exceptions, and safely synchronizes approved transactions to the existing WCED-style `.xls` cashbook.
+Ledgerly imports Standard Bank statements, reconciles them, helps the bursar classify exceptions, and safely synchronizes approved transactions to the existing WCED-style `.xls` cashbook.
 
 ## Installed bursar application
 
 The bursar does not need Python, a terminal, or a batch file.
 
 1. Run `BursarCashbook-Setup.exe`.
-2. Open **Bursar Cashbook** from the Desktop or Start Menu.
+2. Open **Ledgerly** from the Desktop or Start Menu.
 3. Register the current cashbook, import a Standard Bank statement, review exceptions, and open the cashbook in Excel.
 
 Application records are kept in `%LOCALAPPDATA%\\BursarCashbook`, not in Program Files. This includes the SQLite database (transactions, learned rules, and sync history), live cashbook, backups, logs, and configuration. Upgrades and normal uninstalls preserve these records. Only the explicit in-app **Clear workspace** action removes Ledgerly database records.

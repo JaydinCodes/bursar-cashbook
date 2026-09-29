@@ -121,7 +121,7 @@ def _validate_sqlite_backup(path: Path) -> None:
         }
         required = {"categories", "rules", "statements", "transactions"}
         if not required.issubset(tables):
-            raise ValueError("Backup is not a valid Bursar Cashbook database.")
+            raise ValueError("Backup is not a valid Ledgerly database.")
     finally:
         connection.close()
 

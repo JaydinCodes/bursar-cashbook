@@ -1,15 +1,15 @@
-# Bursar Cashbook User Guide
+# Ledgerly User Guide
 
 ## First time
 
-1. Open **Bursar Cashbook** from the Desktop or Start Menu.
+1. Open **Ledgerly** from the Desktop or Start Menu.
 2. Follow the on-screen setup guide: connect the current WCED `.xls` cashbook, then import a Standard Bank statement when one is available.
 3. The application confirms the connected file and its cashbook layout before it can be synchronized.
 4. Keep a normal school backup of the original cashbook as well.
 
 ## Daily workflow
 
-1. Open **Bursar Cashbook** from the desktop.
+1. Open **Ledgerly** from the desktop.
 2. Close the cashbook in Excel before synchronizing it.
 3. Select **Import statement** from Overview or Transactions and choose your Standard Bank statement.
 4. Open **Transactions** and review any items that need a category.
