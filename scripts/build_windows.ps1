@@ -60,7 +60,7 @@ if ($BuildInstaller -or $isccPath) {
 
     Write-Host "Using Inno Setup compiler: $isccPath"
 
-    & $isccPath 'installer\BursarCashbook.iss'
+    & $isccPath "/DMyAppVersion=$version" 'installer\BursarCashbook.iss'
 
     if ($LASTEXITCODE -ne 0) {
         throw 'Inno Setup build failed.'

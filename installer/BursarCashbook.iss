@@ -1,6 +1,8 @@
 ; Build after PyInstaller: ISCC installer\BursarCashbook.iss
 #define MyAppName "Ledgerly"
-#define MyAppVersion "0.8.0-rc2"
+#ifndef MyAppVersion
+  #define MyAppVersion "0.8.0-rc2"
+#endif
 #define MyAppPublisher "Ledgerly"
 #define MyAppExeName "BursarCashbook.exe"
 
@@ -9,10 +11,10 @@ AppId={{C7FE7CF9-0957-4C59-8F85-CE9190B231D3}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
-DefaultDirName={autopf}\Bursar Cashbook
+DefaultDirName={autopf}\Ledgerly
 DefaultGroupName={#MyAppName}
 OutputDir=..\release
-OutputBaseFilename=BursarCashbook-0.8.0-rc2-Setup
+OutputBaseFilename=BursarCashbook-{#MyAppVersion}-Setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -34,4 +36,4 @@ Name: "{autodesktop}\Ledgerly"; Filename: "{app}\{#MyAppExeName}"; Tasks: deskto
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: checkedonce
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "Launch Bursar Cashbook"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppExeName}"; Description: "Launch Ledgerly"; Flags: nowait postinstall skipifsilent
