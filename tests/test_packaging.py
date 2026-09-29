@@ -12,6 +12,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class BuildDependencyTests(unittest.TestCase):
+    def test_windows_metadata_is_generated_from_application_version(self):
+        from app.version import APP_VERSION
+        generator = (PROJECT_ROOT / "scripts" / "generate_version_info.py").read_text(encoding="utf-8")
+        metadata = (PROJECT_ROOT / "installer" / "version_info.txt").read_text(encoding="utf-8")
+        self.assertIn("from app.version import APP_VERSION", generator)
+        self.assertIn(APP_VERSION, metadata)
+
     def test_installer_preserves_accounting_data_on_normal_uninstall(self):
         installer = (PROJECT_ROOT / "installer" / "BursarCashbook.iss").read_text(
             encoding="utf-8"
@@ -52,6 +59,12 @@ class BuildDependencyTests(unittest.TestCase):
         )
         self.assertIn("Narrative column", review_html)
         self.assertIn("narrative_field", review_html)
+
+    def test_sync_preview_offers_explicit_historical_row_adoption(self):
+        ui = (PROJECT_ROOT / "app" / "static" / "historical-match-ui.js").read_text(encoding="utf-8")
+        self.assertIn("historical_matches", ui)
+        self.assertIn("Already in cashbook", ui)
+        self.assertIn("/cashbook/adopt-existing-row", ui)
 
     def test_desktop_ui_uses_bundled_icons_and_a_guided_workflow(self):
         review_html = (PROJECT_ROOT / "app" / "static" / "review.html").read_text(
